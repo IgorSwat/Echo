@@ -1,0 +1,40 @@
+{
+  "num_codebooks": 16,
+
+  "vocab_size": {
+    "text": 128,
+    "audio": 2048
+  },
+
+  "limits": {
+    "text_seq_len": 512,
+    "audio_seq_len": 512
+  },
+
+  "special_tokens": {
+    "text_pad": 0,
+    "audio_eos": 2048
+  },
+
+  "embedding_dim": 512,
+  "intermediate_dim": 768,
+
+  "decoder": {
+    "no_layers": 8,
+    "no_heads": 12,
+    "hidden_dim": 768,
+    "ffn_dim": 3072,
+    "ffn_glu": false,
+    "dropout": 0.1
+  },
+
+  "heads": {
+    "no_heads": 16,
+    "no_layers": 2,
+    "hidden_dim": 512,
+    "logit_dim": 2049,
+    "dropout": 0.1
+  },
+
+  "init_std": 0.02
+}

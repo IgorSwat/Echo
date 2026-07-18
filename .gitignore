@@ -123,4 +123,6 @@ $RECYCLE.BIN/
 data/**/*.mp3
 data/**/*.wav
 data/**/*.npz
-models/**
+
+# Misc
+knowledge/**

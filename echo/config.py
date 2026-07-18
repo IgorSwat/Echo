@@ -1,21 +1,66 @@
-"""Central configuration for the Echo text-to-speech model.
+from __future__ import annotations
 
-The file is organized in clearly separated sections, one per model
-component, plus a "common" section for hyperparameters shared across the
-whole pipeline and a "constants" section for fixed values that are part of
-the problem definition rather than tunable hyperparameters.
-"""
+import json
+from pathlib import Path
 
-# =========
-# Constants
-# =========
+_cfg_path = Path(__file__).resolve().parent.parent / "models" / "config.json"
+_cfg = json.loads(_cfg_path.read_text(encoding="utf-8"))
 
-# Codebook geometry ----------------------------------------------------------
-# Each audio frame is represented as a stack of RVQ codebooks.
-NUM_CODEBOOKS: int = 16          # number of codebook layers per time step
-CODEC_VOCAB_SIZE: int = 2048     # number of real token values per codebook
-TEXT_VOCAB_SIZE: int = 128       # number of distinct phoneme tokens (0..127)
+# ---------------------------------------------------------------------------
+# Codebook geometry
+# ---------------------------------------------------------------------------
+NUM_CODEBOOKS: int = _cfg["num_codebooks"]
+CODEC_VOCAB_SIZE: int = _cfg["vocab_size"]["audio"]
+TEXT_VOCAB_SIZE: int = _cfg["vocab_size"]["text"]
 
-# Sequence bounds ------------------------------------------------------------
-MAX_AUDIO_LENGTH: int = 512      # maximum number of audio time steps (codec temporal dimension)
-MAX_TEXT_LENGTH: int = 512       # maximum number of text time steps (phoneme tokens)
+# ---------------------------------------------------------------------------
+# Sequence bounds
+# ---------------------------------------------------------------------------
+MAX_AUDIO_LENGTH: int = _cfg["limits"]["audio_seq_len"]
+MAX_TEXT_LENGTH: int = _cfg["limits"]["text_seq_len"]
+
+# ---------------------------------------------------------------------------
+# Special tokens
+# ---------------------------------------------------------------------------
+TEXT_PAD_ID: int = _cfg["special_tokens"]["text_pad"]
+CODEC_EOS_ID: int = _cfg["special_tokens"]["audio_eos"]
+
+CODEC_LOGIT_DIM: int = CODEC_VOCAB_SIZE + 1
+
+# ---------------------------------------------------------------------------
+# Dimensions
+# ---------------------------------------------------------------------------
+D_EMB: int = _cfg["embedding_dim"]
+D_MODEL: int = _cfg["decoder"]["hidden_dim"]
+D_REPR: int = _cfg["intermediate_dim"]
+
+DROPOUT: float = _cfg["decoder"]["dropout"]
+
+# ---------------------------------------------------------------------------
+# Embedding tables
+# ---------------------------------------------------------------------------
+TEXT_EMB_DIM: int = D_EMB
+TEXT_POS_SIZE: int = MAX_TEXT_LENGTH
+CODEC_EMB_DIM: int = D_EMB
+CODEC_POS_SIZE: int = MAX_AUDIO_LENGTH
+
+# ---------------------------------------------------------------------------
+# Transformer decoder
+# ---------------------------------------------------------------------------
+NUM_LAYERS: int = _cfg["decoder"]["no_layers"]
+NUM_HEADS: int = _cfg["decoder"]["no_heads"]
+FFN_DIM: int = _cfg["decoder"]["ffn_dim"]
+FFN_GLU: bool = _cfg["decoder"]["ffn_glu"]
+
+# ---------------------------------------------------------------------------
+# Prediction heads
+# ---------------------------------------------------------------------------
+PRED_NUM_HEADS: int = _cfg["heads"]["no_heads"]
+PRED_HIDDEN_DIM: int = _cfg["heads"]["hidden_dim"]
+PRED_NUM_LAYERS: int = _cfg["heads"]["no_layers"]
+PRED_DROPOUT: float = _cfg["heads"]["dropout"]
+
+# ---------------------------------------------------------------------------
+# Weight init
+# ---------------------------------------------------------------------------
+INIT_STD: float = _cfg["init_std"]
