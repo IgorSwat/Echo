@@ -221,6 +221,7 @@ class Echo(nn.Module):
 
         Returns (frames, lengths) where frame is (1, T, NUM_CODEBOOKS) and lengths is tensor([T]).
         """
+        
         self.eval()
 
         T_audio = audio_codec.size(1) if audio_codec is not None else 0

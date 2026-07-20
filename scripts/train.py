@@ -163,11 +163,16 @@ def main() -> None:
             audio_codec = audio_codec.to(device)
 
             logits = model(texts, audio_codec)                                      # (B, T, NB, V)
-            logits_shifted = logits[:, :-1, :, :]                                   # (B, T-1, NB, V)
             targets = audio_codec[:, 1:, :]                                         # (B, T-1, NB)
 
+            # Last logit position predicts EOS on head 0, pad on rest.
+            eos_id = cfg["special_tokens"]["audio_eos"]
+            eos_frame = torch.full((targets.size(0), 1, targets.size(2)), pad_id, dtype=targets.dtype, device=device)
+            eos_frame[:, 0, 0] = eos_id
+            targets = torch.cat([targets, eos_frame], dim=1)                        # (B, T, NB)
+
             loss = _compute_loss(
-                logits_shifted, targets, pad_id,
+                logits, targets, pad_id,
                 weighted=train_cfg["weighted_loss"],
                 decay=train_cfg["loss_decay"],
             )
@@ -193,14 +198,17 @@ def main() -> None:
         elapsed = time.perf_counter() - epoch_start
         print(f"epoch {epoch + 1:3d} | avg loss {avg_loss:.4f} | time {elapsed:.1f}s")
 
-        ckpt = {
-            "epoch": epoch + 1,
-            "global_step": global_step,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": opt.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-        }
-        torch.save(ckpt, output_dir / f"checkpoint_epoch{epoch + 1:03d}.pt")
+        save_every = train_cfg["save_interval"]
+        is_last = epoch == train_cfg["num_epochs"] - 1
+        if is_last or (save_every > 0 and (epoch + 1) % save_every == 0):
+            ckpt = {
+                "epoch": epoch + 1,
+                "global_step": global_step,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": opt.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+            }
+            torch.save(ckpt, output_dir / f"checkpoint_epoch{epoch + 1:03d}.pt")
 
     print("done")
 

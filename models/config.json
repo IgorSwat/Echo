@@ -33,7 +33,7 @@
     "no_heads": 16,
     "no_layers": 2,
     "hidden_dim": 512,
-    "logit_dim": 2049,
+    "logit_dim": 2050,
     "dropout": 0.1
   },
 
@@ -49,7 +49,7 @@
     "weighted_loss": false,
     "loss_decay": 0.9,
     "log_interval": 50,
-    "save_interval": 1000,
+    "save_interval": 2,
     "phonemes_csv": "data/norbi/phonemes.csv",
     "codec_dir": "data/norbi/codecs",
     "output_dir": "models"
