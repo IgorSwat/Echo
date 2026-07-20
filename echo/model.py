@@ -211,6 +211,7 @@ class Echo(nn.Module):
         text: torch.Tensor,
         audio_codec: Optional[torch.Tensor] = None,
         max_steps: int = config.MAX_AUDIO_LENGTH,
+        min_steps: int = 0,
         temperature: float = 1.0,
         eos_id: int = config.CODEC_EOS_ID,
         pad_id: int = 0,
@@ -237,7 +238,7 @@ class Echo(nn.Module):
                 probs = torch.softmax(frame_logits / temperature, dim=-1)
                 frame = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-            if frame[0].item() == eos_id:
+            if i >= min_steps and frame[0].item() == eos_id:
                 break
 
             frames.append(frame)
