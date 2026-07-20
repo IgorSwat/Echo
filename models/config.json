@@ -50,6 +50,7 @@
     "loss_decay": 0.9,
     "log_interval": 50,
     "save_interval": 2,
+    "val_fraction": 0.1,
     "phonemes_csv": "data/norbi/phonemes.csv",
     "codec_dir": "data/norbi/codecs",
     "output_dir": "models"

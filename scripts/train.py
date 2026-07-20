@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
@@ -44,23 +44,30 @@ def _build_model(cfg: dict) -> Echo:
     )
 
 
-def _build_dataloader(
-    cfg: dict, 
-    root: Path, 
-    batch_size: int
-) -> DataLoader:
-    # Initialize tokenizer
+def _build_dataloaders(
+    cfg: dict,
+    root: Path,
+    batch_size: int,
+    val_fraction: float,
+) -> tuple[DataLoader, DataLoader | None]:
     tokenizer = Tokenizer(root / "models" / "phoneme_vocab.json")
-    
-    # Now the entire Dataset wrapper (uses tokenizer inside)
     tc = cfg["training"]
     ds = EchoDataset(
         Path(tc["phonemes_csv"]),
         Path(tc["codec_dir"]),
         tokenizer,
     )
-    
-    return DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
+
+    if val_fraction > 0:
+        val_size = max(1, int(len(ds) * val_fraction))
+        train_size = len(ds) - val_size
+        train_ds, val_ds = random_split(ds, [train_size, val_size])
+        val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, drop_last=False)
+        train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
+        return train_dl, val_dl
+
+    train_dl = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
+    return train_dl, None
 
 
 # IMPORTANT
@@ -94,6 +101,27 @@ def _compute_loss(
     return total_loss / num_valid
 
 
+@torch.no_grad()
+def _validate(model: Echo, dl: DataLoader, pad_id: int, eos_id: int, device: torch.device, weighted: bool, decay: float) -> float:
+    model.eval()
+    total_loss = 0.0
+    for texts, audio_codec in dl:
+        texts = texts.to(device)
+        audio_codec = audio_codec.to(device)
+
+        logits = model(texts, audio_codec)
+        targets = audio_codec[:, 1:, :]
+
+        eos_frame = torch.full((targets.size(0), 1, targets.size(2)), pad_id, dtype=targets.dtype, device=device)
+        eos_frame[:, 0, 0] = eos_id
+        targets = torch.cat([targets, eos_frame], dim=1)
+
+        total_loss += _compute_loss(logits, targets, pad_id, weighted=weighted, decay=decay).item()
+
+    model.train()
+    return total_loss / len(dl)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the Echo model")
     parser.add_argument("--config", type=str, default="models/config.json", help="Path to config file")
@@ -125,8 +153,10 @@ def main() -> None:
     print(f"parameters: {total_params / 1e6:.1f}M")
 
     # Build the dataset from provided path and config setup
-    dl = _build_dataloader(cfg, root, train_cfg["batch_size"])
-    print(f"batches per epoch: {len(dl)}")
+    train_dl, val_dl = _build_dataloaders(cfg, root, train_cfg["batch_size"], train_cfg["val_fraction"])
+    print(f"batches per epoch: {len(train_dl)}")
+    if val_dl:
+        print(f"val batches: {len(val_dl)}")
 
     # Build optimizer
     opt = torch.optim.AdamW(
@@ -135,7 +165,7 @@ def main() -> None:
         weight_decay=train_cfg["weight_decay"]
     )
 
-    total_steps = train_cfg["num_epochs"] * len(dl)
+    total_steps = train_cfg["num_epochs"] * len(train_dl)
     warmup_fraction = train_cfg["warmup_fraction"]
     warmup_steps = int(warmup_fraction * total_steps)
 
@@ -158,7 +188,7 @@ def main() -> None:
         epoch_start = time.perf_counter()
         epoch_loss = 0.0
 
-        for texts, audio_codec in dl:
+        for texts, audio_codec in train_dl:
             texts = texts.to(device)
             audio_codec = audio_codec.to(device)
 
@@ -194,9 +224,16 @@ def main() -> None:
                 lr = scheduler.get_last_lr()[0]
                 print(f"  step {global_step:6d} | loss {loss.item():.4f} | lr {lr:.2e}")
 
-        avg_loss = epoch_loss / len(dl)
+        avg_loss = epoch_loss / len(train_dl)
         elapsed = time.perf_counter() - epoch_start
-        print(f"epoch {epoch + 1:3d} | avg loss {avg_loss:.4f} | time {elapsed:.1f}s")
+        status = f"epoch {epoch + 1:3d} | train loss {avg_loss:.4f}"
+
+        if val_dl:
+            val_loss = _validate(model, val_dl, pad_id, eos_id, device,
+                                 weighted=train_cfg["weighted_loss"], decay=train_cfg["loss_decay"])
+            status += f" | val loss {val_loss:.4f}"
+
+        print(f"{status} | time {elapsed:.1f}s")
 
         save_every = train_cfg["save_interval"]
         is_last = epoch == train_cfg["num_epochs"] - 1
