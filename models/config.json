@@ -3,7 +3,7 @@
 
   "vocab_size": {
     "text": 128,
-    "audio": 2048
+    "audio": 2049
   },
 
   "limits": {
@@ -13,7 +13,8 @@
 
   "special_tokens": {
     "text_pad": 0,
-    "audio_eos": 2048
+    "audio_pad": 2048,
+    "audio_eos": 2049
   },
 
   "embedding_dim": 512,

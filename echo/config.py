@@ -23,9 +23,10 @@ MAX_TEXT_LENGTH: int = _cfg["limits"]["text_seq_len"]
 # Special tokens
 # ---------------------------------------------------------------------------
 TEXT_PAD_ID: int = _cfg["special_tokens"]["text_pad"]
+CODEC_PAD_ID: int = _cfg["special_tokens"]["audio_pad"]
 CODEC_EOS_ID: int = _cfg["special_tokens"]["audio_eos"]
 
-CODEC_LOGIT_DIM: int = CODEC_VOCAB_SIZE + 1
+CODEC_LOGIT_DIM: int = CODEC_VOCAB_SIZE + 1   # + extra EOS token which does not apper in input sequences
 
 # ---------------------------------------------------------------------------
 # Dimensions

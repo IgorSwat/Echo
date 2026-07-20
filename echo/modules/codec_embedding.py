@@ -34,9 +34,9 @@ class CodecEmbedding(nn.Module):
         nn.init.normal_(self.embedding.weight, mean=0.0, std=config.INIT_STD)
         nn.init.normal_(self.pos_embedding.weight, mean=0.0, std=config.INIT_STD)
         
-        # Treat id 0 of every codebook as a neutral / padding token.
+        # Zero-init the pad token embedding for every codebook layer.
         for c in range(self.num_codebooks):
-            nn.init.zeros_(self.embedding.weight[c * self.vocab_size])
+            nn.init.zeros_(self.embedding.weight[c * self.vocab_size + config.CODEC_PAD_ID])
 
     def _embed_codes(self, codes: torch.Tensor) -> torch.Tensor:
         # Per-codebook offset broadcast along the codebook (last) axis.
