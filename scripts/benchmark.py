@@ -88,8 +88,23 @@ def main() -> None:
     model = Echo().to(DEVICE).eval()
     torch.set_float32_matmul_precision("high")
 
+    # Fixed reference prompt used across all measurements. The reference provides
+    # voice/style conditioning; the target text + target audio are varied below.
+    ref_text_len = 32
+    ref_audio_len = 64
     text_lens = [32, 64, 128, 256]
     audio_lens = [32, 64, 128]
+
+    ref_text = torch.randint(
+        0, config.TEXT_VOCAB_SIZE, (BATCH, ref_text_len), device=DEVICE
+    ).long()
+    ref_audio = torch.randint(
+        0, config.CODEC_VOCAB_SIZE, (BATCH, ref_audio_len, config.NUM_CODEBOOKS), device=DEVICE
+    ).long()
+
+    print_info("Ref text len", str(ref_text_len))
+    print_info("Ref audio len", str(ref_audio_len))
+    print()
 
     # ---- Forward (teacher-forcing) ----
     print_section("Forward pass (teacher-forcing)")
@@ -102,11 +117,13 @@ def main() -> None:
             text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
             audio = torch.randint(0, config.CODEC_VOCAB_SIZE, (BATCH, alen, config.NUM_CODEBOOKS), device=DEVICE).long()
 
-            def _fwd():
-                return model(text, audio)
+            def _fwd(text=text, audio=audio):
+                return model(ref_text, ref_audio, text, audio)
 
             avg = _time_it(_fwd)
-            total_tokens = tlen + 1 + alen  # text + sep + audio
+            # <BOS> + ref_text + <REF_TEXT_EOS> + ref_audio + <REF_CODEC_EOS>
+            # + text + <TEXT_EOS> + audio
+            total_tokens = 1 + ref_text_len + 1 + ref_audio_len + 1 + tlen + 1 + alen
             tok_per_s = total_tokens / avg
             print(f"  {tlen:>8}  {alen:>9}  {_fmt_time(avg):>10}  {tok_per_s:>10.0f}")
 
@@ -114,42 +131,41 @@ def main() -> None:
 
     # ---- Prefill ----
     print_section("Prefill (warm-start decoding)")
-    header = f"  {'text len':>8}  {'audio len':>9}  {'time':>10}  {'tokens/s':>10}"
+    header = f"  {'text len':>8}  {'time':>10}  {'tokens/s':>10}"
     print(header)
     print_separator(width=len(header))
 
     for tlen in text_lens:
-        for alen in audio_lens:
-            text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
-            audio = torch.randint(0, config.CODEC_VOCAB_SIZE, (BATCH, alen, config.NUM_CODEBOOKS), device=DEVICE).long()
+        text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
 
-            def _prefill():
-                return model.prefill(text, audio)
+        def _prefill(text=text):
+            return model.prefill(ref_text, ref_audio, text)
 
-            avg = _time_it(_prefill)
-            total_tokens = tlen + 1 + alen
-            tok_per_s = total_tokens / avg
-            print(f"  {tlen:>8}  {alen:>9}  {_fmt_time(avg):>10}  {tok_per_s:>10.0f}")
+        avg = _time_it(_prefill)
+        # Prefill consumes the full prompt + text but no target audio.
+        total_tokens = 1 + ref_text_len + 1 + ref_audio_len + 1 + tlen + 1
+        tok_per_s = total_tokens / avg
+        print(f"  {tlen:>8}  {_fmt_time(avg):>10}  {tok_per_s:>10.0f}")
 
     print()
 
     # ---- Step (iterative decoding) ----
     print_section("Step (single-frame iterative decode)")
-    header = f"  {'seq len':>8}  {'time/step':>12}  {'real-time factor':>17}"
+    header = f"  {'text len':>8}  {'time/step':>12}  {'real-time factor':>17}"
     print(header)
     print_separator(width=len(header))
 
     # Time per step is roughly constant but let's measure at different cache sizes
-    for tlen in [32, 128, 512]:
+    # (driven by the target text length; the reference prompt is held fixed).
+    for tlen in [32, 128, 256]:
         text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
-        audio = torch.randint(0, config.CODEC_VOCAB_SIZE, (BATCH, 64, config.NUM_CODEBOOKS), device=DEVICE).long()
-        _, kv_cache = model.prefill(text, audio)
-        start_pos = audio.size(1)
+        _, kv_cache = model.prefill(ref_text, ref_audio, text)
+        start_pos = 1 + ref_text_len + 1 + ref_audio_len + 1 + tlen + 1
 
         frame = torch.randint(0, config.CODEC_VOCAB_SIZE, (BATCH, config.NUM_CODEBOOKS), device=DEVICE).long()
 
         def _step():
-            return model.step(frame, position=start_pos + 1, kv_cache=kv_cache)
+            return model.step(frame, position=start_pos, kv_cache=kv_cache)
 
         avg = _time_it(_step, warmup=3, repeats=REPEATS)
         # Real-time factor: 1 frame = 12.5ms at 80Hz codec => how much faster is generation vs real-time?

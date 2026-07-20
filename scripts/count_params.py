@@ -39,15 +39,20 @@ def main() -> None:
     # --- Embeddings ---
     print_section("Embeddings")
     text_token = model.text_embed.token_embed.weight.numel()
-    text_pos = model.text_embed.pos_embed.weight.numel()
-    sep_emb = model.sep_embed.weight.numel()
     codec_emb = sum(p.numel() for p in model.codec_embed.parameters())
-    emb_total = text_token + text_pos + sep_emb + codec_emb
+    special_emb = (
+        model.bos_embed.numel()
+        + model.ref_text_eos_embed.numel()
+        + model.ref_codec_eos_embed.numel()
+        + model.text_eos_embed.numel()
+    )
+    pos_emb = model.pos_embed.weight.numel()
+    emb_total = text_token + codec_emb + special_emb + pos_emb
 
     print_info("Text token embedding", _fmt(text_token))
-    print_info("Text positional embedding", _fmt(text_pos))
-    print_info("Sep token embedding", _fmt(sep_emb))
     print_info("Codec embedding", _fmt(codec_emb))
+    print_info("Special token embeddings", _fmt(special_emb))
+    print_info("Joint positional embedding", _fmt(pos_emb))
     print_info("Embeddings subtotal", f"{_fmt(emb_total)} ({_pct(emb_total, total)})", Colors.OKCYAN)
 
     # --- Projections ---

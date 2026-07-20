@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -28,7 +29,6 @@ def _build_model(cfg: dict) -> Echo:
     return Echo(
         text_vocab_size=cfg["vocab_size"]["text"],
         text_emb_dim=cfg["embedding_dim"],
-        text_pos_size=cfg["limits"]["text_seq_len"],
         d_emb=cfg["embedding_dim"],
         d_model=cfg["decoder"]["hidden_dim"],
         d_repr=cfg["intermediate_dim"],
@@ -58,15 +58,20 @@ def _build_dataloaders(
         tokenizer,
     )
 
+    # Bind the full dataset to the collate function so each batch can draw a
+    # shared (ref_text, ref_audio_codec) reference pair from anywhere in the
+    # training set, not just from the current batch.
+    collate = partial(collate_fn, dataset=ds)
+
     if val_fraction > 0:
         val_size = max(1, int(len(ds) * val_fraction))
         train_size = len(ds) - val_size
         train_ds, val_ds = random_split(ds, [train_size, val_size])
-        val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, drop_last=False)
-        train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
+        val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate, drop_last=False)
+        train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate, drop_last=True)
         return train_dl, val_dl
 
-    train_dl = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
+    train_dl = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate, drop_last=True)
     return train_dl, None
 
 
@@ -105,12 +110,14 @@ def _compute_loss(
 def _validate(model: Echo, dl: DataLoader, pad_id: int, eos_id: int, device: torch.device, weighted: bool, decay: float) -> float:
     model.eval()
     total_loss = 0.0
-    for texts, audio_codec in dl:
+    for ref_text, ref_audio, texts, audio_codec in dl:
+        ref_text = ref_text.to(device)
+        ref_audio = ref_audio.to(device)
         texts = texts.to(device)
         audio_codec = audio_codec.to(device)
 
-        logits = model(texts, audio_codec)
-        targets = audio_codec[:, 1:, :]
+        logits = model(ref_text, ref_audio, texts, audio_codec)
+        targets = audio_codec
 
         eos_frame = torch.full((targets.size(0), 1, targets.size(2)), pad_id, dtype=targets.dtype, device=device)
         eos_frame[:, 0, 0] = eos_id
@@ -188,18 +195,22 @@ def main() -> None:
         epoch_start = time.perf_counter()
         epoch_loss = 0.0
 
-        for texts, audio_codec in train_dl:
+        for ref_text, ref_audio, texts, audio_codec in train_dl:
+            ref_text = ref_text.to(device)
+            ref_audio = ref_audio.to(device)
             texts = texts.to(device)
             audio_codec = audio_codec.to(device)
 
-            logits = model(texts, audio_codec)                                      # (B, T, NB, V)
-            targets = audio_codec[:, 1:, :]                                         # (B, T-1, NB)
+            logits = model(ref_text, ref_audio, texts, audio_codec)                       # (B, T+1, NB, V)
+            # No slice: position 0 (the <TEXT_EOS> logit) predicts audio[0],
+            # and the final position predicts <EOS>. Aligns with prefill.
+            targets = audio_codec                                                          # (B, T, NB)
 
             # Last logit position predicts EOS on head 0, pad on rest.
-            eos_id = cfg["special_tokens"]["audio_eos"]
+            eos_id = cfg["special_tokens"]["eos"]
             eos_frame = torch.full((targets.size(0), 1, targets.size(2)), pad_id, dtype=targets.dtype, device=device)
             eos_frame[:, 0, 0] = eos_id
-            targets = torch.cat([targets, eos_frame], dim=1)                        # (B, T, NB)
+            targets = torch.cat([targets, eos_frame], dim=1)                                # (B, T+1, NB)
 
             loss = _compute_loss(
                 logits, targets, pad_id,

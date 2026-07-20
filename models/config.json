@@ -7,14 +7,18 @@
   },
 
   "limits": {
-    "text_seq_len": 512,
+    "text_seq_len": 256,
     "audio_seq_len": 512
   },
 
   "special_tokens": {
     "text_pad": 0,
     "audio_pad": 2048,
-    "audio_eos": 2049
+    "bos": 256,
+    "ref_text_eos": 257,
+    "ref_codec_eos": 258,
+    "text_eos": 259,
+    "eos": 260
   },
 
   "embedding_dim": 512,

@@ -18,13 +18,21 @@ TEXT_VOCAB_SIZE: int = _cfg["vocab_size"]["text"]
 # ---------------------------------------------------------------------------
 MAX_AUDIO_LENGTH: int = _cfg["limits"]["audio_seq_len"]
 MAX_TEXT_LENGTH: int = _cfg["limits"]["text_seq_len"]
+# Upper bound on the full embedded sequence length:
+#   <BOS> + ref_text + <REF_TEXT_EOS> + ref_audio + <REF_CODEC_EOS>
+#   + text + <TEXT_EOS> + audio
+MAX_SEQ_LEN: int = 2 * MAX_TEXT_LENGTH + 2 * MAX_AUDIO_LENGTH + 4
 
 # ---------------------------------------------------------------------------
 # Special tokens
 # ---------------------------------------------------------------------------
 TEXT_PAD_ID: int = _cfg["special_tokens"]["text_pad"]
 CODEC_PAD_ID: int = _cfg["special_tokens"]["audio_pad"]
-CODEC_EOS_ID: int = _cfg["special_tokens"]["audio_eos"]
+BOS_ID = _cfg["special_tokens"]["bos"]
+REF_TEXT_EOS_ID = _cfg["special_tokens"]["ref_text_eos"]
+REF_CODEC_EOS_ID = _cfg["special_tokens"]["ref_codec_eos"]
+TEXT_EOS_ID = _cfg["special_tokens"]["text_eos"]
+EOS_ID = _cfg["special_tokens"]["eos"]
 
 CODEC_LOGIT_DIM: int = CODEC_VOCAB_SIZE + 1   # + extra EOS token which does not apper in input sequences
 
