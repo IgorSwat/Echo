@@ -143,9 +143,8 @@ def main() -> None:
     for tlen in [32, 128, 512]:
         text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
         audio = torch.randint(0, config.CODEC_VOCAB_SIZE, (BATCH, 64, config.NUM_CODEBOOKS), device=DEVICE).long()
-        pre = model.prefill(text, audio)
-        kv_cache = pre.kv_cache
-        start_pos = model._prefill_audio_len
+        _, kv_cache = model.prefill(text, audio)
+        start_pos = audio.size(1)
 
         frame = torch.randint(0, config.CODEC_VOCAB_SIZE, (BATCH, config.NUM_CODEBOOKS), device=DEVICE).long()
 

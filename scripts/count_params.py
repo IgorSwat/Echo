@@ -38,13 +38,13 @@ def main() -> None:
 
     # --- Embeddings ---
     print_section("Embeddings")
-    text_emb = model.text_embed.weight.numel()
-    text_pos = model.text_pos.weight.numel()
+    text_token = model.text_embed.token_embed.weight.numel()
+    text_pos = model.text_embed.pos_embed.weight.numel()
     sep_emb = model.sep_embed.weight.numel()
     codec_emb = sum(p.numel() for p in model.codec_embed.parameters())
-    emb_total = text_emb + text_pos + sep_emb + codec_emb
+    emb_total = text_token + text_pos + sep_emb + codec_emb
 
-    print_info("Text phoneme embedding", _fmt(text_emb))
+    print_info("Text token embedding", _fmt(text_token))
     print_info("Text positional embedding", _fmt(text_pos))
     print_info("Sep token embedding", _fmt(sep_emb))
     print_info("Codec embedding", _fmt(codec_emb))
@@ -92,9 +92,9 @@ def main() -> None:
 
     # --- Prediction heads ---
     print_section("Prediction heads")
-    num_heads = len(model.heads.heads)
-    per_head = sum(p.numel() for p in model.heads.heads[0].parameters())
-    heads_total = per_head * num_heads
+    heads_total = sum(p.numel() for p in model.heads.parameters())
+    num_heads = model.heads.num_heads
+    per_head = heads_total // num_heads
     print_info("Per head", _fmt(per_head))
     print_info(f"All {num_heads} heads", f"{_fmt(heads_total)} ({_pct(heads_total, total)})", Colors.OKCYAN)
 
