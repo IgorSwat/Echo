@@ -2,7 +2,7 @@
   "num_codebooks": 16,
 
   "vocab_size": {
-    "text": 128,
+    "text": 256,
     "audio": 2049
   },
 
