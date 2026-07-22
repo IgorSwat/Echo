@@ -10,11 +10,12 @@ import torch
 def collate_fn(
     batch: list[tuple[torch.Tensor, torch.Tensor]],
     dataset=None,
+    reference_index: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Samples a shared ``(ref_text, ref_audio_codec)`` pair from ``dataset``
-    (uniform over the full training set, independent of the batch) and pads
-    the per-item text and audio targets.
+    (or uses ``reference_index`` when provided) and pads the per-item text
+    and audio targets.
 
     Text is padded with ``TEXT_PAD_ID``; audio frames are padded with the
     ``CODEC_PAD_ID`` vector on every codebook layer. The shared reference
@@ -43,7 +44,8 @@ def collate_fn(
         ref_text = texts[j].unsqueeze(0)
         ref_audio = audios[j].unsqueeze(0)
     else:
-        ref_text, ref_audio = dataset[random.randrange(len(dataset))]
+        index = reference_index if reference_index is not None else random.randrange(len(dataset))
+        ref_text, ref_audio = dataset[index]
         ref_text = ref_text.unsqueeze(0)
         ref_audio = ref_audio.unsqueeze(0)
 

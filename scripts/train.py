@@ -35,20 +35,19 @@ def _build_dataloaders(
         tokenizer,
     )
 
-    # Bind the full dataset to the collate function so each batch can draw a
-    # shared (ref_text, ref_audio_codec) reference pair from anywhere in the
-    # training set, not just from the current batch.
-    collate = partial(collate_fn, dataset=ds)
-
     if cfg.training_val_fraction > 0:
         val_size = max(1, int(len(ds) * cfg.training_val_fraction))
         train_size = len(ds) - val_size
         train_ds, val_ds = random_split(ds, [train_size, val_size])
-        val_dl = DataLoader(val_ds, batch_size=cfg.training_batch_size, shuffle=False, collate_fn=collate, drop_last=False)
-        train_dl = DataLoader(train_ds, batch_size=cfg.training_batch_size, shuffle=True, collate_fn=collate, drop_last=True)
+        train_collate = partial(collate_fn, dataset=train_ds)
+        # A fixed held-out reference makes validation loss comparable between epochs.
+        val_collate = partial(collate_fn, dataset=val_ds, reference_index=0)
+        val_dl = DataLoader(val_ds, batch_size=cfg.training_batch_size, shuffle=False, collate_fn=val_collate, drop_last=False)
+        train_dl = DataLoader(train_ds, batch_size=cfg.training_batch_size, shuffle=True, collate_fn=train_collate, drop_last=True)
         return train_dl, val_dl
 
-    train_dl = DataLoader(ds, batch_size=cfg.training_batch_size, shuffle=True, collate_fn=collate, drop_last=True)
+    train_collate = partial(collate_fn, dataset=ds)
+    train_dl = DataLoader(ds, batch_size=cfg.training_batch_size, shuffle=True, collate_fn=train_collate, drop_last=True)
     return train_dl, None
 
 
