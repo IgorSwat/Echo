@@ -28,7 +28,7 @@ class CodebookProjector(nn.Module):
         num_layers: int,
         num_heads: int,
         ffn_dim: int,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.d_model = d_model

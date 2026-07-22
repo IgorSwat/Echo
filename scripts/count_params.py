@@ -48,15 +48,13 @@ def main() -> None:
         + model.ref_codec_eos_embed.numel()
         + model.text_eos_embed.numel()
     )
-    pos_emb = model.pos_embed.weight.numel()
-    emb_total = text_token + codec_emb + special_emb + pos_emb
+    emb_total = text_token + codec_emb + special_emb
 
     print_info("Text token embedding", _fmt(text_token))
     print_info("Codec embedding", _fmt(codec_emb))
     print(f"    ├─ embedding table:  {_fmt(codec_table)}")
     print(f"    └─ fuse MLP:        {_fmt(codec_mlp)}")
     print_info("Special token embeddings", _fmt(special_emb))
-    print_info("Joint positional embedding", _fmt(pos_emb))
     print_info("Embeddings subtotal", f"{_fmt(emb_total)} ({_pct(emb_total, total)})", Colors.OKCYAN)
 
     # --- Projections ---

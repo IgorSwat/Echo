@@ -42,8 +42,6 @@ class Echo(nn.Module):
         self.ref_codec_eos_embed = nn.Parameter(torch.empty(cfg.embedding_dim))
         self.text_eos_embed = nn.Parameter(torch.empty(cfg.embedding_dim))
 
-        self.pos_embed = nn.Embedding(cfg.max_seq_len, cfg.embedding_dim)
-
         # Dimension adapters
         self.input_proj = nn.Linear(cfg.embedding_dim, cfg.decoder_hidden_dim) if cfg.embedding_dim != cfg.decoder_hidden_dim else nn.Identity()
         self.output_proj = nn.Linear(cfg.decoder_hidden_dim, cfg.intermediate_dim) if cfg.decoder_hidden_dim != cfg.intermediate_dim else nn.Identity()
@@ -55,6 +53,7 @@ class Echo(nn.Module):
             num_heads=cfg.decoder_num_heads,
             ffn_dim=cfg.decoder_ffn_dim,
             dropout=cfg.decoder_dropout,
+            use_rope=True,
         )
 
         # Codebook projector
@@ -76,7 +75,6 @@ class Echo(nn.Module):
     def _init_weights(self) -> None:
         for p in (self.bos_embed, self.ref_text_eos_embed, self.ref_codec_eos_embed, self.text_eos_embed):
             nn.init.normal_(p, mean=0.0, std=self.cfg.init_std)
-        nn.init.normal_(self.pos_embed.weight, mean=0.0, std=self.cfg.init_std)
 
     def _embed_prompt(
         self,
@@ -105,12 +103,6 @@ class Echo(nn.Module):
         parts.append(self.text_eos_embed.view(1, 1, -1).expand(B, 1, self.d_emb))
 
         x = torch.cat(parts, dim=1)
-
-        # Joint learned positional embeddings across the whole sequence.
-        T = x.size(1)
-        positions = torch.arange(T, device=x.device)
-        x = x + self.pos_embed(positions)
-
         return x
 
     def _embed_training_batch(
@@ -151,9 +143,6 @@ class Echo(nn.Module):
             sequences.append(sequence)
 
         max_len = max(sequence_lengths)
-        if max_len > self.pos_embed.num_embeddings:
-            raise ValueError(f"sequence length {max_len} exceeds maximum {self.pos_embed.num_embeddings}")
-
         x = sequences[0].new_zeros((B, max_len, self.d_emb))
         valid_mask = torch.zeros((B, max_len), dtype=torch.bool, device=x.device)
         for i, sequence in enumerate(sequences):
@@ -161,8 +150,6 @@ class Echo(nn.Module):
             x[i, :length] = sequence
             valid_mask[i, :length] = True
 
-        positions = torch.arange(max_len, device=x.device).view(1, -1).expand(B, -1)
-        x = x + self.pos_embed(positions)
         x = x.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
         return x, valid_mask, torch.tensor(prediction_starts, device=x.device)
 
@@ -171,9 +158,10 @@ class Echo(nn.Module):
         x: torch.Tensor,
         kv_cache: Optional[KVCache],
         key_padding_mask: Optional[torch.Tensor] = None,
+        start_pos: int = 0,
     ) -> tuple[torch.Tensor, KVCache]:
         x = self.input_proj(x)
-        hidden, kv_cache = self.transformer(x, kv_cache, key_padding_mask)
+        hidden, kv_cache = self.transformer(x, kv_cache, key_padding_mask, start_pos)
         hidden = self.output_proj(hidden)
         return hidden, kv_cache
 
@@ -185,7 +173,7 @@ class Echo(nn.Module):
         """
 
         embeddings = self.codec_embed.embed_codebooks(codes)
-        
+
         return self.projector(embeddings, hidden)
 
     def forward(
@@ -241,6 +229,7 @@ class Echo(nn.Module):
 
         x = self._embed_prompt(ref_text, ref_audio_codec, text)
         hidden, kv_cache = self._run_transformer(x, kv_cache=None)
+        
         return hidden[:, -1:], kv_cache
 
     def step(
@@ -250,15 +239,10 @@ class Echo(nn.Module):
         kv_cache: KVCache,
     ):
         """
-        Single-step forward pass using KV cache. Embeds only the provided codebook
-        frame and applies the joint positional embedding for the given position.
+        Single-step forward pass using KV cache.
         """
-
         frame_emb = self.codec_embed(codebook.unsqueeze(1))           # (B, 1, D)
-        pos = torch.tensor([position], device=frame_emb.device)
-        frame_emb = frame_emb + self.pos_embed(pos)                   # (1, D) broadcasts over (B, 1, D)
-
-        hidden, new_cache = self._run_transformer(frame_emb, kv_cache)
+        hidden, new_cache = self._run_transformer(frame_emb, kv_cache, start_pos=position)
         return hidden, new_cache
 
     def _sample_frame(
@@ -270,8 +254,10 @@ class Echo(nn.Module):
     ) -> tuple[torch.Tensor, bool]:
         """Predict one frame autoregressively across codebook layers."""
         greedy = temperature < 1e-5
+
         B = hidden.size(0)
         C = self.cfg.num_codebooks
+
         device = hidden.device
         frame = torch.zeros(B, C, dtype=torch.long, device=device)
 
