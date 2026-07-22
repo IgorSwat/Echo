@@ -109,13 +109,20 @@ def _compute_loss(
 
 
 def _build_targets(audio_codec: torch.Tensor, audio_lengths: torch.Tensor, eos_id: int) -> torch.Tensor:
-    """Build real codec targets plus head-0 EOS; all other slots are ignored."""
+    """
+    Build real codec targets plus head-0 EOS; all other slots are ignored.
+    """
+
     B, T, C = audio_codec.shape
+
+    # IGNORE_INDEX = -100 is a default ignore index in F.cross_entropy
     targets = torch.full((B, T + 1, C), IGNORE_INDEX, dtype=audio_codec.dtype, device=audio_codec.device)
+
     for i in range(B):
         length = int(audio_lengths[i].item())
         targets[i, :length] = audio_codec[i, :length]
         targets[i, length, 0] = eos_id
+
     return targets
 
 

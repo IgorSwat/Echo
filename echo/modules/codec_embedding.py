@@ -1,4 +1,4 @@
-import math
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
@@ -8,51 +8,85 @@ from echo import config
 
 class CodecEmbedding(nn.Module):
     """
-    Sum-pooled, per-codebook embedding for the audio codec grid
-    (positional encoding handled jointly at model level).
+    Per-codebook token embeddings with an optional MLP compressor that
+    fuses per-layer info into a single vector per time step.
     """
 
     def __init__(
         self,
-        vocab_size: int = config.CODEC_VOCAB_SIZE,
-        num_codebooks: int = config.NUM_CODEBOOKS,
-        emb_dim: int = config.CODEC_EMB_DIM,
+        vocab_size: int,                # Number of possible tokens
+        num_codebook_layers: int,            # Number of layers (16 by default)
+        token_embedding_dim: int,      # Embedding per single token
+        codebook_embedding_dim: int,   # Fused embedding per codebook frame
+        mlp_hidden_dim: int,           # Dimensionality of MLP hidden layer(s)
+        mlp_num_layers: int,           # Total linear layers (e.g. 2 = 1 hidden + 1 output)
+        mlp_dropout: float,
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
-        self.num_codebooks = num_codebooks
-        self.emb_dim = emb_dim
+        self.num_codebook_layers = num_codebook_layers
+        self.token_embedding_dim = token_embedding_dim
+        self.codebook_embedding_dim = codebook_embedding_dim
 
-        # One linearized table: codebook c, token t -> row c * vocab_size + t.
-        self.embedding = nn.Embedding(num_codebooks * vocab_size, emb_dim)
+        # All layers have it's own embedding table, but we fuse them together with linearization technique.
+        self.embedding = nn.Embedding(num_codebook_layers * vocab_size, token_embedding_dim)
+
+        in_dim = num_codebook_layers * token_embedding_dim
+        layers: list[nn.Module] = []
+        if mlp_num_layers == 1:
+            layers.append(nn.Linear(in_dim, codebook_embedding_dim))
+        else:
+            layers.append(nn.Linear(in_dim, mlp_hidden_dim))
+            layers.append(nn.GELU())
+            if mlp_dropout > 0:
+                layers.append(nn.Dropout(mlp_dropout))
+            for _ in range(mlp_num_layers - 2):
+                layers.append(nn.Linear(mlp_hidden_dim, mlp_hidden_dim))
+                layers.append(nn.GELU())
+                if mlp_dropout > 0:
+                    layers.append(nn.Dropout(mlp_dropout))
+            layers.append(nn.Linear(mlp_hidden_dim, codebook_embedding_dim))
+
+        self.fuse_mlp = nn.Sequential(*layers)
 
         self._init_weights()
 
     def _init_weights(self) -> None:
         nn.init.normal_(self.embedding.weight, mean=0.0, std=config.INIT_STD)
-
-        # Zero-init the pad token embedding for every codebook layer.
-        for c in range(self.num_codebooks):
+        for c in range(self.num_codebook_layers):
             nn.init.zeros_(self.embedding.weight[c * self.vocab_size + config.CODEC_PAD_ID])
 
-    def embed_codebooks(self, codes: torch.Tensor) -> torch.Tensor:
-        """Embed every codebook independently, keeping PAD exactly zero."""
-        offsets = torch.arange(self.num_codebooks, device=codes.device) * self.vocab_size
-        indices = codes + offsets
+        for m in self.fuse_mlp:
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, mean=0.0, std=config.INIT_STD)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
+    def embed_codebooks(self, codes: torch.Tensor) -> torch.Tensor:
+        """
+        Look up per-codebook token embeddings. Shape: (..., T, C) -> (..., T, C, Dt).
+        """
+
+        offsets = torch.arange(self.num_codebook_layers, device=codes.device) * self.vocab_size
+        indices = codes + offsets
         embedding = self.embedding(indices)
+
+        # Mask-out the pad tokens
         return embedding.masked_fill((codes == config.CODEC_PAD_ID).unsqueeze(-1), 0.0)
 
-    def forward(self, codes: torch.Tensor) -> torch.Tensor:
+    def forward(self, codes: torch.Tensor, fuse: bool = True) -> torch.Tensor:
         """
-        Input:  audio codec (B, T, NUM_CODEBOOKS)
-        Output: audio embeddings (B, T, D_emb) — no positional encoding.
+        Input:  audio codec (B, T, C)
+        Output: if compress=False -> (B, T, C, token_embedding_dim)
+                if compress=True  -> (B, T, codebook_embedding_dim) after MLP fusion
         """
 
-        emb = self.embed_codebooks(codes)             # (B, T, NUM_CODEBOOKS, D)
+        emb = self.embed_codebooks(codes)            # (B, T, C, token_embedding_dim)
+        if not fuse:
+            return emb
 
-        # Codebook are hierarchical, so we want to mix them up to get
-        # a single representation for entire sequence in given time step.
-        # Since embeddings are pretty vast (17M parameters), we don't need separate linear projections - 
-        # a simple summation should be enough.
-        return emb.sum(dim=-2) / math.sqrt(self.num_codebooks)  # (B, T, D)
+        B, T = codes.shape[:2]
+        flat = emb.reshape(B, T, -1)                # (B, T, C * token_embedding_dim)
+        fused_emb = self.fuse_mlp(flat)
+
+        return fused_emb

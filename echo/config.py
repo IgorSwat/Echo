@@ -50,8 +50,12 @@ DROPOUT: float = _cfg["decoder"]["dropout"]
 # ---------------------------------------------------------------------------
 TEXT_EMB_DIM: int = D_EMB
 TEXT_POS_SIZE: int = MAX_TEXT_LENGTH
+CODEC_TOKEN_EMB_DIM: int = _cfg["codec_embedding"]["token_embedding_dim"]
 CODEC_EMB_DIM: int = D_EMB
 CODEC_POS_SIZE: int = MAX_AUDIO_LENGTH
+CODEC_MLP_HIDDEN_DIM: int = _cfg["codec_embedding"]["mlp_hidden_dim"]
+CODEC_MLP_NUM_LAYERS: int = _cfg["codec_embedding"]["mlp_num_layers"]
+CODEC_MLP_DROPOUT: float = _cfg["codec_embedding"]["mlp_dropout"]
 
 # ---------------------------------------------------------------------------
 # Transformer decoder

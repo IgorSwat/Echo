@@ -25,4 +25,6 @@ class TextEmbedding(nn.Module):
     def forward(self, text: torch.Tensor) -> torch.Tensor:
         """(B, T) → (B, T, emb_dim)"""
         embedding = self.token_embed(text)
+
+        # Mask PAD tokens
         return embedding.masked_fill((text == config.TEXT_PAD_ID).unsqueeze(-1), 0.0)

@@ -39,7 +39,9 @@ def main() -> None:
     # --- Embeddings ---
     print_section("Embeddings")
     text_token = model.text_embed.token_embed.weight.numel()
-    codec_emb = sum(p.numel() for p in model.codec_embed.parameters())
+    codec_table = sum(p.numel() for p in model.codec_embed.embedding.parameters())
+    codec_mlp = sum(p.numel() for p in model.codec_embed.fuse_mlp.parameters())
+    codec_emb = codec_table + codec_mlp
     special_emb = (
         model.bos_embed.numel()
         + model.ref_text_eos_embed.numel()
@@ -51,6 +53,8 @@ def main() -> None:
 
     print_info("Text token embedding", _fmt(text_token))
     print_info("Codec embedding", _fmt(codec_emb))
+    print(f"    ├─ embedding table:  {_fmt(codec_table)}")
+    print(f"    └─ fuse MLP:        {_fmt(codec_mlp)}")
     print_info("Special token embeddings", _fmt(special_emb))
     print_info("Joint positional embedding", _fmt(pos_emb))
     print_info("Embeddings subtotal", f"{_fmt(emb_total)} ({_pct(emb_total, total)})", Colors.OKCYAN)

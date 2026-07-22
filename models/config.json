@@ -22,13 +22,20 @@
   },
 
   "embedding_dim": 512,
-  "intermediate_dim": 768,
+  "intermediate_dim": 512,
+
+  "codec_embedding": {
+    "token_embedding_dim": 128,
+    "mlp_hidden_dim": 1024,
+    "mlp_num_layers": 2,
+    "mlp_dropout": 0.0
+  },
 
   "decoder": {
-    "no_layers": 8,
-    "no_heads": 12,
-    "hidden_dim": 768,
-    "ffn_dim": 3072,
+    "no_layers": 12,
+    "no_heads": 8,
+    "hidden_dim": 512,
+    "ffn_dim": 2048,
     "ffn_glu": false,
     "dropout": 0.2
   },
@@ -36,7 +43,7 @@
   "heads": {
     "no_heads": 16,
     "no_layers": 2,
-    "hidden_dim": 512,
+    "hidden_dim": 384,
     "logit_dim": 2050,
     "dropout": 0.3
   },
@@ -48,7 +55,7 @@
     "batch_size": 8,
     "num_epochs": 50,
     "warmup_fraction": 0.02,
-    "weight_decay": 0.02,
+    "weight_decay": 0.05,
     "grad_clip": 1.0,
     "weighted_loss": true,
     "loss_decay": 0.9,

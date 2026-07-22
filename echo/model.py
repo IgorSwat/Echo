@@ -41,6 +41,7 @@ class Echo(nn.Module):
         self.d_model = d_model
         self.d_repr = d_repr
         self.num_pred_heads = num_pred_heads
+        self.token_embedding_dim = config.CODEC_TOKEN_EMB_DIM
 
         # Embeddings
         # - Text embeddings - simple Embedding table (no positional).
@@ -50,8 +51,12 @@ class Echo(nn.Module):
         self.text_embed = TextEmbedding(text_vocab_size, text_emb_dim)
         self.codec_embed = CodecEmbedding(
             vocab_size=codec_logit_dim - 1,
-            num_codebooks=num_pred_heads,
-            emb_dim=d_emb,
+            num_codebook_layers=num_pred_heads,
+            token_embedding_dim=config.CODEC_TOKEN_EMB_DIM,
+            codebook_embedding_dim=config.CODEC_EMB_DIM,
+            mlp_hidden_dim=config.CODEC_MLP_HIDDEN_DIM,
+            mlp_num_layers=config.CODEC_MLP_NUM_LAYERS,
+            mlp_dropout=config.CODEC_MLP_DROPOUT,
         )
 
         self.bos_embed = nn.Parameter(torch.empty(d_emb))
@@ -66,7 +71,7 @@ class Echo(nn.Module):
         # we use linear projections to match them (or nn.Identity if already matched).
         self.input_proj = nn.Linear(d_emb, d_model) if d_emb != d_model else nn.Identity()
         self.output_proj = nn.Linear(d_model, d_repr) if d_model != d_repr else nn.Identity()
-        self.codec_condition_proj = nn.Linear(d_emb, d_repr, bias=False)
+        self.codec_condition_proj = nn.Linear(self.token_embedding_dim, d_repr, bias=False)
 
         # Transformer decoder
         # The heart of the model.
@@ -293,7 +298,7 @@ class Echo(nn.Module):
         """Predict one frame, conditioning each codebook on earlier books."""
         greedy = temperature < 1e-5
         frame = torch.zeros((hidden.size(0), self.num_pred_heads), dtype=torch.long, device=hidden.device)
-        previous_sum = hidden.new_zeros((hidden.size(0), self.d_emb))
+        previous_sum = hidden.new_zeros((hidden.size(0), self.token_embedding_dim))
 
         for codebook in range(self.num_pred_heads):
             conditioning = None
