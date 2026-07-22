@@ -49,6 +49,7 @@ class CausalSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         kv_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,  # (B, T) bool: True=keep, False=pad
     ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
         # batch_size, temporal, hidden_dim
         B, T, D = x.shape
@@ -69,12 +70,29 @@ class CausalSelfAttention(nn.Module):
             v = torch.cat([kv_cache[1], v], dim=2)
         new_kv = (k, v)            # always return K,V — caller decides whether to keep/discard
 
-        # In prefill (no cache) we apply a causal mask; 
-		# In KV-cache single-step mode the single new query sits at the end of the cached sequence, 
-		# so attending to all cached keys is already causal and no mask is needed.
-        is_causal = kv_cache is None
+        # We have 2 types of masking here:
+        # - Casual attention mask: allows items to only see itself and previous items in a sequence. Upper-triangular.
+        # - Key-padding mask: a custom mask which disables interactions involving all the padding tokens.
+        is_causal = kv_cache is None and key_padding_mask is None
+        attn_mask = None
+        if key_padding_mask is not None:
+            if kv_cache is not None:
+                raise ValueError("key_padding_mask is only supported without a KV cache")
+            if key_padding_mask.shape != (B, T):
+                raise ValueError(f"expected key_padding_mask shape {(B, T)}, got {tuple(key_padding_mask.shape)}")
+
+            causal = torch.ones((T, T), dtype=torch.bool, device=x.device).tril()
+            
+            # Result: (B, 1, T, T) lower-triangular with padded columns zeroed out, e.g. for T=4, pad at pos 2,3:
+            #  [[[ T . . . ]    [[[ T . . . ]        [ T . . . ]
+            #    [ T T . . ]  &   [ F F . . ]]  ->   [ F F . . ]
+            #    [ T T T . ]      [ F F . . ]]       [ F F . . ]
+            #    [ T T T T ]]]   [ F F . . ]]]       [ F F . . ]]]
+            attn_mask = causal.view(1, 1, T, T) & key_padding_mask.view(B, 1, 1, T)
+
         out = F.scaled_dot_product_attention(
             q, k, v,
+            attn_mask=attn_mask,
             dropout_p=self.attn_drop_value if self.training else 0.0,
             is_causal=is_causal,
         )                                          # (B, nh, T, hd)

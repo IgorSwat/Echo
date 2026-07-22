@@ -99,7 +99,7 @@ def main() -> None:
         0, config.TEXT_VOCAB_SIZE, (BATCH, ref_text_len), device=DEVICE
     ).long()
     ref_audio = torch.randint(
-        0, config.CODEC_VOCAB_SIZE, (BATCH, ref_audio_len, config.NUM_CODEBOOKS), device=DEVICE
+        0, config.CODEC_PAD_ID, (BATCH, ref_audio_len, config.NUM_CODEBOOKS), device=DEVICE
     ).long()
 
     print_info("Ref text len", str(ref_text_len))
@@ -115,10 +115,12 @@ def main() -> None:
     for tlen in text_lens:
         for alen in audio_lens:
             text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
-            audio = torch.randint(0, config.CODEC_VOCAB_SIZE, (BATCH, alen, config.NUM_CODEBOOKS), device=DEVICE).long()
+            audio = torch.randint(0, config.CODEC_PAD_ID, (BATCH, alen, config.NUM_CODEBOOKS), device=DEVICE).long()
+            text_lengths = torch.full((BATCH,), tlen, dtype=torch.long, device=DEVICE)
+            audio_lengths = torch.full((BATCH,), alen, dtype=torch.long, device=DEVICE)
 
             def _fwd(text=text, audio=audio):
-                return model(ref_text, ref_audio, text, audio)
+                return model(ref_text, ref_audio, text, audio, text_lengths, audio_lengths)
 
             avg = _time_it(_fwd)
             # <BOS> + ref_text + <REF_TEXT_EOS> + ref_audio + <REF_CODEC_EOS>
@@ -162,7 +164,7 @@ def main() -> None:
         _, kv_cache = model.prefill(ref_text, ref_audio, text)
         start_pos = 1 + ref_text_len + 1 + ref_audio_len + 1 + tlen + 1
 
-        frame = torch.randint(0, config.CODEC_VOCAB_SIZE, (BATCH, config.NUM_CODEBOOKS), device=DEVICE).long()
+        frame = torch.randint(0, config.CODEC_PAD_ID, (BATCH, config.NUM_CODEBOOKS), device=DEVICE).long()
 
         def _step():
             return model.step(frame, position=start_pos, kv_cache=kv_cache)

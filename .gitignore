@@ -124,5 +124,8 @@ data/**/*.mp3
 data/**/*.wav
 data/**/*.npz
 
+# Model files
+models/*.pt
+models/*.pth
+
 # Misc
-knowledge/**

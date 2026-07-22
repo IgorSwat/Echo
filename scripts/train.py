@@ -20,6 +20,9 @@ from echo.training.dataset import EchoDataset
 from echo.training.collate import collate_fn
 
 
+IGNORE_INDEX = -100
+
+
 def _load_config(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -77,53 +80,61 @@ def _build_dataloaders(
 
 # IMPORTANT
 def _compute_loss(
-    logits: torch.Tensor, targets: torch.Tensor, pad_id: int,
+    logits: torch.Tensor, targets: torch.Tensor,
     weighted: bool = False, decay: float = 0.9,
 ) -> torch.Tensor:
     # logits: (B, T, C, V), targets: (B, T, C)
     B, T, C, V = logits.shape
 
-    mask = (targets[:, :, 0] != pad_id).unsqueeze(-1)          # (B, T, 1)
+    mask = targets != IGNORE_INDEX
     logits_flat = logits.reshape(B * T * C, V)
     targets_flat = targets.reshape(B * T * C)
 
-    ce = F.cross_entropy(logits_flat, targets_flat, reduction="none")
+    ce = F.cross_entropy(logits_flat, targets_flat, reduction="none", ignore_index=IGNORE_INDEX)
     ce = ce.view(B, T, C)
 
-    expanded_mask = mask.expand(-1, -1, C)                     # (B, T, C)
-    masked_ce = ce * expanded_mask
+    masked_ce = ce * mask
 
     if weighted:
         # Codebook layers are hierarchical — lower layers carry more information.
         # Layer c gets weight decay^c (layer 0 = 1.0, layer 1 = decay, ...).
         weights = decay ** torch.arange(C, device=logits.device)       # (C,)
         total_loss = (masked_ce * weights).sum()                       # scale each layer's CE by its weight
-        num_valid = (expanded_mask * weights).sum().clamp(min=1)       # scale token counts by the same weights
+        num_valid = (mask * weights).sum().clamp(min=1)                # scale token counts by the same weights
     else:
         total_loss = masked_ce.sum()                                   # all layers weighted equally
-        num_valid = expanded_mask.sum().clamp(min=1)                   # raw count of non-pad tokens
+        num_valid = mask.sum().clamp(min=1)                            # raw count of supervised tokens
 
     return total_loss / num_valid
 
 
+def _build_targets(audio_codec: torch.Tensor, audio_lengths: torch.Tensor, eos_id: int) -> torch.Tensor:
+    """Build real codec targets plus head-0 EOS; all other slots are ignored."""
+    B, T, C = audio_codec.shape
+    targets = torch.full((B, T + 1, C), IGNORE_INDEX, dtype=audio_codec.dtype, device=audio_codec.device)
+    for i in range(B):
+        length = int(audio_lengths[i].item())
+        targets[i, :length] = audio_codec[i, :length]
+        targets[i, length, 0] = eos_id
+    return targets
+
+
 @torch.no_grad()
-def _validate(model: Echo, dl: DataLoader, pad_id: int, eos_id: int, device: torch.device, weighted: bool, decay: float) -> float:
+def _validate(model: Echo, dl: DataLoader, eos_id: int, device: torch.device, weighted: bool, decay: float) -> float:
     model.eval()
     total_loss = 0.0
-    for ref_text, ref_audio, texts, audio_codec in dl:
+    for ref_text, ref_audio, texts, audio_codec, text_lengths, audio_lengths in dl:
         ref_text = ref_text.to(device)
         ref_audio = ref_audio.to(device)
         texts = texts.to(device)
         audio_codec = audio_codec.to(device)
+        text_lengths = text_lengths.to(device)
+        audio_lengths = audio_lengths.to(device)
 
-        logits = model(ref_text, ref_audio, texts, audio_codec)
-        targets = audio_codec
+        logits = model(ref_text, ref_audio, texts, audio_codec, text_lengths, audio_lengths)
+        targets = _build_targets(audio_codec, audio_lengths, eos_id)
 
-        eos_frame = torch.full((targets.size(0), 1, targets.size(2)), pad_id, dtype=targets.dtype, device=device)
-        eos_frame[:, 0, 0] = eos_id
-        targets = torch.cat([targets, eos_frame], dim=1)
-
-        total_loss += _compute_loss(logits, targets, pad_id, weighted=weighted, decay=decay).item()
+        total_loss += _compute_loss(logits, targets, weighted=weighted, decay=decay).item()
 
     model.train()
     return total_loss / len(dl)
@@ -132,7 +143,7 @@ def _validate(model: Echo, dl: DataLoader, pad_id: int, eos_id: int, device: tor
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the Echo model")
     parser.add_argument("--config", type=str, default="models/config.json", help="Path to config file")
-    parser.add_argument("--model", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
     root = _REPO_ROOT
@@ -152,9 +163,13 @@ def main() -> None:
 
     # Build the model from provided config
     model = _build_model(cfg)
-    if args.model:
-        model.load_state_dict(torch.load(args.model, map_location=device, weights_only=True))
-        print(f"loaded checkpoint: {args.model}")
+    if args.checkpoint:
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+        else:
+            model.load_state_dict(ckpt)
+        print(f"loaded checkpoint: {args.checkpoint}")
     model = model.to(device).train()
     total_params = sum(p.numel() for p in model.parameters())
     print(f"parameters: {total_params / 1e6:.1f}M")
@@ -185,7 +200,6 @@ def main() -> None:
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, _lr_schedule)
 
-    pad_id = cfg["special_tokens"]["audio_pad"]
     output_dir = root / train_cfg["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
     global_step = 0
@@ -195,25 +209,20 @@ def main() -> None:
         epoch_start = time.perf_counter()
         epoch_loss = 0.0
 
-        for ref_text, ref_audio, texts, audio_codec in train_dl:
+        for ref_text, ref_audio, texts, audio_codec, text_lengths, audio_lengths in train_dl:
             ref_text = ref_text.to(device)
             ref_audio = ref_audio.to(device)
             texts = texts.to(device)
             audio_codec = audio_codec.to(device)
+            text_lengths = text_lengths.to(device)
+            audio_lengths = audio_lengths.to(device)
 
-            logits = model(ref_text, ref_audio, texts, audio_codec)                       # (B, T+1, NB, V)
-            # No slice: position 0 (the <TEXT_EOS> logit) predicts audio[0],
-            # and the final position predicts <EOS>. Aligns with prefill.
-            targets = audio_codec                                                          # (B, T, NB)
-
-            # Last logit position predicts EOS on head 0, pad on rest.
             eos_id = cfg["special_tokens"]["eos"]
-            eos_frame = torch.full((targets.size(0), 1, targets.size(2)), pad_id, dtype=targets.dtype, device=device)
-            eos_frame[:, 0, 0] = eos_id
-            targets = torch.cat([targets, eos_frame], dim=1)                                # (B, T+1, NB)
+            logits = model(ref_text, ref_audio, texts, audio_codec, text_lengths, audio_lengths)
+            targets = _build_targets(audio_codec, audio_lengths, eos_id)
 
             loss = _compute_loss(
-                logits, targets, pad_id,
+                logits, targets,
                 weighted=train_cfg["weighted_loss"],
                 decay=train_cfg["loss_decay"],
             )
@@ -240,7 +249,7 @@ def main() -> None:
         status = f"epoch {epoch + 1:3d} | train loss {avg_loss:.4f}"
 
         if val_dl:
-            val_loss = _validate(model, val_dl, pad_id, eos_id, device,
+            val_loss = _validate(model, val_dl, eos_id, device,
                                  weighted=train_cfg["weighted_loss"], decay=train_cfg["loss_decay"])
             status += f" | val loss {val_loss:.4f}"
 

@@ -10,7 +10,7 @@ import torch
 def collate_fn(
     batch: list[tuple[torch.Tensor, torch.Tensor]],
     dataset=None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Samples a shared ``(ref_text, ref_audio_codec)`` pair from ``dataset``
     (uniform over the full training set, independent of the batch) and pads
@@ -26,6 +26,8 @@ def collate_fn(
         ref_audio_codec   — ``(1, T_ref_audio, NUM_CODEBOOKS)``
         text              — ``(B, T_text)``
         audio_codec       — ``(B, T_audio, NUM_CODEBOOKS)``
+        text_lengths      — ``(B,)`` true target-text lengths
+        audio_lengths     — ``(B,)`` true target-audio lengths
     """
     texts, audios = zip(*batch)
     texts, audios = list(texts), list(audios)
@@ -62,4 +64,6 @@ def collate_fn(
     for i, a in enumerate(audios):
         padded_audios[i, : a.size(0)] = a
 
-    return ref_text, ref_audio, padded_texts, padded_audios
+    text_lengths = torch.tensor([t.size(0) for t in texts], dtype=torch.long)
+    audio_lengths = torch.tensor([a.size(0) for a in audios], dtype=torch.long)
+    return ref_text, ref_audio, padded_texts, padded_audios, text_lengths, audio_lengths

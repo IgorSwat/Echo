@@ -18,7 +18,7 @@
     "ref_text_eos": 257,
     "ref_codec_eos": 258,
     "text_eos": 259,
-    "eos": 260
+    "eos": 2049
   },
 
   "embedding_dim": 512,
@@ -30,7 +30,7 @@
     "hidden_dim": 768,
     "ffn_dim": 3072,
     "ffn_glu": false,
-    "dropout": 0.1
+    "dropout": 0.2
   },
 
   "heads": {
@@ -38,7 +38,7 @@
     "no_layers": 2,
     "hidden_dim": 512,
     "logit_dim": 2050,
-    "dropout": 0.1
+    "dropout": 0.3
   },
 
   "init_std": 0.02,
@@ -46,11 +46,11 @@
   "training": {
     "learning_rate": 3e-4,
     "batch_size": 8,
-    "num_epochs": 10,
-    "warmup_fraction": 0.1,
-    "weight_decay": 0.01,
+    "num_epochs": 50,
+    "warmup_fraction": 0.02,
+    "weight_decay": 0.02,
     "grad_clip": 1.0,
-    "weighted_loss": false,
+    "weighted_loss": true,
     "loss_decay": 0.9,
     "log_interval": 50,
     "save_interval": 2,

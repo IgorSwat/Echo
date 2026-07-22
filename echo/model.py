@@ -8,6 +8,7 @@ from echo.modules.text_embedding import TextEmbedding
 from echo.modules.types import KVCache
 
 from typing import Optional
+import math
 
 import torch
 import torch.nn as nn
@@ -47,7 +48,11 @@ class Echo(nn.Module):
         # - Special token embeddings - one learnable vector per special token, hardcoded here.
         # - Joint learned positional embeddings applied to the entire sequence.
         self.text_embed = TextEmbedding(text_vocab_size, text_emb_dim)
-        self.codec_embed = CodecEmbedding()
+        self.codec_embed = CodecEmbedding(
+            vocab_size=codec_logit_dim - 1,
+            num_codebooks=num_pred_heads,
+            emb_dim=d_emb,
+        )
 
         self.bos_embed = nn.Parameter(torch.empty(d_emb))
         self.ref_text_eos_embed = nn.Parameter(torch.empty(d_emb))
@@ -61,6 +66,7 @@ class Echo(nn.Module):
         # we use linear projections to match them (or nn.Identity if already matched).
         self.input_proj = nn.Linear(d_emb, d_model) if d_emb != d_model else nn.Identity()
         self.output_proj = nn.Linear(d_model, d_repr) if d_model != d_repr else nn.Identity()
+        self.codec_condition_proj = nn.Linear(d_emb, d_repr, bias=False)
 
         # Transformer decoder
         # The heart of the model.
@@ -82,21 +88,21 @@ class Echo(nn.Module):
             dropout=pred_dropout,
         )
 
-    def _embed(
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for p in (self.bos_embed, self.ref_text_eos_embed, self.ref_codec_eos_embed, self.text_eos_embed):
+            nn.init.normal_(p, mean=0.0, std=config.INIT_STD)
+        nn.init.normal_(self.pos_embed.weight, mean=0.0, std=config.INIT_STD)
+        nn.init.normal_(self.codec_condition_proj.weight, mean=0.0, std=config.INIT_STD)
+
+    def _embed_prompt(
         self,
         ref_text: torch.Tensor,
         ref_audio_codec: torch.Tensor,
         text: torch.Tensor,
-        audio_codec: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Concatenate embeddings for the provided modalities.
-
-        * with audio → ``[E(<BOS>), E(ref_text), E(<REF_TEXT_EOS>), E(ref_audio_codec), E(<REF_CODEC_EOS>), E(text), E(<TEXT_EOS>), E(audio_codec)]``
-        * without audio → ``[E(<BOS>), E(ref_text), E(<REF_TEXT_EOS>), E(ref_audio_codec), E(<REF_CODEC_EOS>), E(text), E(<TEXT_EOS>)]``
-
-        Output: ``(B, total_len, d_emb)``
-        """
+        """Embed an unpadded inference prompt."""
         B = ref_text.size(0)
 
         parts: list[torch.Tensor] = []
@@ -116,10 +122,6 @@ class Echo(nn.Module):
         parts.append(self.text_embed(text))
         parts.append(self.text_eos_embed.view(1, 1, -1).expand(B, 1, self.d_emb))
 
-        # Optional target audio codec (teacher forcing).
-        if audio_codec is not None:
-            parts.append(self.codec_embed(audio_codec))
-
         x = torch.cat(parts, dim=1)
 
         # Joint learned positional embeddings across the whole sequence.
@@ -129,42 +131,83 @@ class Echo(nn.Module):
 
         return x
 
+    def _embed_training_batch(
+        self,
+        ref_text: torch.Tensor,
+        ref_audio_codec: torch.Tensor,
+        text: torch.Tensor,
+        audio_codec: torch.Tensor,
+        text_lengths: torch.Tensor,
+        audio_lengths: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Assemble complete per-sample sequences and right-pad the result."""
+        B = text.size(0)
+        ref_text_emb = self.text_embed(ref_text)
+        ref_audio_emb = self.codec_embed(ref_audio_codec)
+        text_emb = self.text_embed(text)
+        audio_emb = self.codec_embed(audio_codec)
+
+        sequences: list[torch.Tensor] = []
+        prediction_starts: list[int] = []
+        sequence_lengths: list[int] = []
+        for i in range(B):
+            text_len = int(text_lengths[i].item())
+            audio_len = int(audio_lengths[i].item())
+            parts = [
+                self.bos_embed.view(1, -1),
+                ref_text_emb[i],
+                self.ref_text_eos_embed.view(1, -1),
+                ref_audio_emb[i],
+                self.ref_codec_eos_embed.view(1, -1),
+                text_emb[i, :text_len],
+                self.text_eos_embed.view(1, -1),
+                audio_emb[i, :audio_len],
+            ]
+            sequence = torch.cat(parts, dim=0)
+            prediction_starts.append(sequence.size(0) - audio_len - 1)
+            sequence_lengths.append(sequence.size(0))
+            sequences.append(sequence)
+
+        max_len = max(sequence_lengths)
+        if max_len > self.pos_embed.num_embeddings:
+            raise ValueError(f"sequence length {max_len} exceeds maximum {self.pos_embed.num_embeddings}")
+
+        x = sequences[0].new_zeros((B, max_len, self.d_emb))
+        valid_mask = torch.zeros((B, max_len), dtype=torch.bool, device=x.device)
+        for i, sequence in enumerate(sequences):
+            length = sequence.size(0)
+            x[i, :length] = sequence
+            valid_mask[i, :length] = True
+
+        positions = torch.arange(max_len, device=x.device).view(1, -1).expand(B, -1)
+        x = x + self.pos_embed(positions)
+        x = x.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
+        return x, valid_mask, torch.tensor(prediction_starts, device=x.device)
+
     def _run_transformer(
         self,
         x: torch.Tensor,
         kv_cache: Optional[KVCache],
-        audio_len: int,
+        key_padding_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, KVCache]:
-        """
-        Project → transformer → project, then slice the output.
-
-        * audio_len > 0 — last ``audio_len`` positions (teacher-forcing)
-        * audio_len == 0 — last position only
-
-        Output: ``(B, out_len, d_repr)``
-        """
-
-        # Projections & main transformer call
         x = self.input_proj(x)
-        hidden, kv_cache = self.transformer(x, kv_cache)
+        hidden, kv_cache = self.transformer(x, kv_cache, key_padding_mask)
         hidden = self.output_proj(hidden)
-
-        # Cut the logits to only return the ones for audio codec (since we do not want to generate text).
-        if audio_len > 0:
-            hidden = hidden[:, -audio_len:]
-        else:
-            hidden = hidden[:, -1:]
-
         return hidden, kv_cache
 
-    def _predict(self, hidden: torch.Tensor) -> torch.Tensor:
+    def _predict(self, hidden: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
         """
         Runs prediction heads.
 
         Output: ``(B, ..., NUM_CODEBOOKS, CODEC_LOGIT_DIM)``
         """
 
-        return self.heads(hidden)
+        codebook_embeddings = self.codec_embed.embed_codebooks(codes)
+        previous = codebook_embeddings.cumsum(dim=-2) - codebook_embeddings
+        counts = torch.arange(self.num_pred_heads, device=hidden.device).clamp(min=1).sqrt()
+        previous = previous / counts.view(*([1] * (previous.ndim - 2)), -1, 1)
+        conditioning = self.codec_condition_proj(previous)
+        return self.heads(hidden, conditioning)
 
 
     def forward(
@@ -173,18 +216,38 @@ class Echo(nn.Module):
         ref_audio_codec: torch.Tensor,
         text: torch.Tensor,
         audio_codec: torch.Tensor,
+        text_lengths: torch.Tensor,
+        audio_lengths: torch.Tensor,
     ) -> torch.Tensor:
         """
         A forward pass strictly for training.
         """
 
-        T_audio = audio_codec.size(1)
+        x, valid_mask, prediction_starts = self._embed_training_batch(
+            ref_text,
+            ref_audio_codec,
+            text,
+            audio_codec,
+            text_lengths,
+            audio_lengths,
+        )
+        hidden, _ = self._run_transformer(x, kv_cache=None, key_padding_mask=valid_mask)
 
-        x = self._embed(ref_text, ref_audio_codec, text, audio_codec)
-        hidden, _ = self._run_transformer(x, kv_cache=None, audio_len=T_audio + 1)  # +1 to include the <TEXT_EOS> position
-        logits = self._predict(hidden)  # (B, T_audio + 1, NUM_CODEBOOKS, CODEC_LOGIT_DIM)
+        max_predictions = audio_codec.size(1) + 1
+        gathered = hidden.new_zeros((hidden.size(0), max_predictions, self.d_repr))
+        prediction_codes = torch.full(
+            (hidden.size(0), max_predictions, self.num_pred_heads),
+            config.CODEC_PAD_ID,
+            dtype=audio_codec.dtype,
+            device=audio_codec.device,
+        )
+        for i in range(hidden.size(0)):
+            count = int(audio_lengths[i].item()) + 1
+            start = int(prediction_starts[i].item())
+            gathered[i, :count] = hidden[i, start:start + count]
+            prediction_codes[i, :count - 1] = audio_codec[i, :count - 1]
 
-        return logits
+        return self._predict(gathered, prediction_codes)
 
     def prefill(
         self,
@@ -198,11 +261,9 @@ class Echo(nn.Module):
         predict the first audio frame.
         """
 
-        x = self._embed(ref_text, ref_audio_codec, text)  # audio_codec=None
-        hidden, kv_cache = self._run_transformer(x, kv_cache=None, audio_len=1)
-        next_logits = self._predict(hidden)
-
-        return next_logits, kv_cache
+        x = self._embed_prompt(ref_text, ref_audio_codec, text)
+        hidden, kv_cache = self._run_transformer(x, kv_cache=None)
+        return hidden[:, -1:], kv_cache
 
     def step(
         self,
@@ -219,10 +280,47 @@ class Echo(nn.Module):
         pos = torch.tensor([position], device=frame_emb.device)
         frame_emb = frame_emb + self.pos_embed(pos)                   # (1, D) broadcasts over (B, 1, D)
 
-        hidden, new_cache = self._run_transformer(frame_emb, kv_cache, audio_len=1)
-        next_logits = self._predict(hidden)
+        hidden, new_cache = self._run_transformer(frame_emb, kv_cache)
+        return hidden, new_cache
 
-        return next_logits, new_cache
+    def _sample_frame(
+        self,
+        hidden: torch.Tensor,
+        temperature: float,
+        allow_eos: bool,
+        eos_id: int,
+    ) -> tuple[torch.Tensor, bool]:
+        """Predict one frame, conditioning each codebook on earlier books."""
+        greedy = temperature < 1e-5
+        frame = torch.zeros((hidden.size(0), self.num_pred_heads), dtype=torch.long, device=hidden.device)
+        previous_sum = hidden.new_zeros((hidden.size(0), self.d_emb))
+
+        for codebook in range(self.num_pred_heads):
+            conditioning = None
+            if codebook > 0:
+                conditioning = self.codec_condition_proj(previous_sum / math.sqrt(codebook))
+            logits = self.heads.forward_head(hidden, codebook, conditioning)
+
+            if codebook == 0:
+                logits[:, config.CODEC_PAD_ID] = -torch.inf
+                if not allow_eos:
+                    logits[:, eos_id] = -torch.inf
+            else:
+                logits[:, config.CODEC_PAD_ID:] = -torch.inf
+
+            if greedy:
+                token = logits.argmax(dim=-1)
+            else:
+                token = torch.multinomial(torch.softmax(logits / temperature, dim=-1), 1).squeeze(-1)
+            frame[:, codebook] = token
+
+            if codebook == 0 and bool((token == eos_id).all()):
+                return frame, True
+
+            token_embedding = self.codec_embed.embed_codebooks(frame[:, None, :].clamp_max(config.CODEC_PAD_ID))
+            previous_sum = token_embedding[:, 0, :codebook + 1].sum(dim=1)
+
+        return frame, False
 
     # ------------------------------------------------------------------
     # Convenience: greedy generation loop (EOS checked on codebook 0)
@@ -237,7 +335,6 @@ class Echo(nn.Module):
         min_steps: int = 0,
         temperature: float = 1.0,
         eos_id: int = config.EOS_ID,
-        pad_id: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Iterative decoding for a single sequence.
@@ -246,11 +343,11 @@ class Echo(nn.Module):
         """
 
         self.eval()
-
-        greedy = temperature < 1e-5
+        if ref_text.size(0) != 1:
+            raise ValueError("generate currently supports batch size 1")
 
         # Prefill consumes the prompt + target text (no audio_codec).
-        logits, kv_cache = self.prefill(ref_text, ref_audio_codec, text)
+        hidden, kv_cache = self.prefill(ref_text, ref_audio_codec, text)
 
         # Number of tokens already in the KV cache = prompt + text + special tokens.
         # The next predicted frame will be placed at this position.
@@ -266,23 +363,21 @@ class Echo(nn.Module):
 
         frames: list[torch.Tensor] = []
         for i in range(max_steps):
-            frame_logits = logits[0, 0]                    # (NUM_CODEBOOKS, VOCAB+1)
-            if greedy:
-                frame = frame_logits.argmax(dim=-1)        # (NUM_CODEBOOKS,)
-            else:
-                probs = torch.softmax(frame_logits / temperature, dim=-1)
-                frame = torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-            if i >= min_steps and frame[0].item() == eos_id:
+            frame_batch, stopped = self._sample_frame(
+                hidden[:, 0],
+                temperature=temperature,
+                allow_eos=i >= min_steps,
+                eos_id=eos_id,
+            )
+            if stopped:
                 break
-
+            frame = frame_batch[0]
             frames.append(frame)
-
-            feed = frame.clone()
-            feed[feed == eos_id] = pad_id
-            logits, kv_cache = self.step(feed.unsqueeze(0), position=start_pos + i, kv_cache=kv_cache)
+            hidden, kv_cache = self.step(frame_batch, position=start_pos + i, kv_cache=kv_cache)
 
         if not frames:
-            return torch.zeros(1, 0, self.num_pred_heads, dtype=torch.long), torch.tensor([0])
+            empty = torch.zeros(1, 0, self.num_pred_heads, dtype=torch.long, device=ref_text.device)
+            return empty, torch.tensor([0], device=ref_text.device)
 
-        return torch.stack(frames, dim=0).unsqueeze(0), torch.tensor([len(frames)])  # (1, T, NB), (1,)
+        lengths = torch.tensor([len(frames)], device=ref_text.device)
+        return torch.stack(frames, dim=0).unsqueeze(0), lengths  # (1, T, NB), (1,)

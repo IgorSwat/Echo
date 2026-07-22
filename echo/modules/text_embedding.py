@@ -15,7 +15,7 @@ class TextEmbedding(nn.Module):
         emb_dim: int,
     ) -> None:
         super().__init__()
-        self.token_embed = nn.Embedding(vocab_size, emb_dim)
+        self.token_embed = nn.Embedding(vocab_size, emb_dim, padding_idx=config.TEXT_PAD_ID)
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -24,4 +24,5 @@ class TextEmbedding(nn.Module):
 
     def forward(self, text: torch.Tensor) -> torch.Tensor:
         """(B, T) → (B, T, emb_dim)"""
-        return self.token_embed(text)
+        embedding = self.token_embed(text)
+        return embedding.masked_fill((text == config.TEXT_PAD_ID).unsqueeze(-1), 0.0)

@@ -130,11 +130,19 @@ class FusedPredictionMultihead(nn.Module):
             nn.init.normal_(w, mean=0.0, std=config.INIT_STD)
             nn.init.zeros_(b)
 
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        """(..., in_dim) → (..., num_heads, out_dim)"""
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        conditioning: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """(..., in_dim) → (..., num_heads, out_dim)."""
         N = self.num_heads
         # Broadcast hidden across the head dimension
         x = hidden.unsqueeze(-2).expand(*hidden.shape[:-1], N, hidden.shape[-1])   # (..., N, in_dim)
+        if conditioning is not None:
+            if conditioning.shape != x.shape:
+                raise ValueError(f"expected conditioning shape {tuple(x.shape)}, got {tuple(conditioning.shape)}")
+            x = x + conditioning
 
         for i, (w, b) in enumerate(zip(self.weights, self.biases)):
             # w: (N, out_f, in_f),  x: (..., N, in_f)  →  (..., N, out_f)
@@ -143,4 +151,19 @@ class FusedPredictionMultihead(nn.Module):
                 x = F.gelu(x)
                 x = F.dropout(x, p=self.dropout_p, training=self.training)
 
+        return x
+
+    def forward_head(
+        self,
+        hidden: torch.Tensor,
+        head: int,
+        conditioning: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run one codebook head for sequential within-frame decoding."""
+        x = hidden if conditioning is None else hidden + conditioning
+        for i, (w, b) in enumerate(zip(self.weights, self.biases)):
+            x = F.linear(x, w[head], b[head])
+            if i < self.num_layers - 1:
+                x = F.gelu(x)
+                x = F.dropout(x, p=self.dropout_p, training=self.training)
         return x

@@ -24,8 +24,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run Echo TTS inference")
     parser.add_argument("--text", type=str, required=True, help="Target phoneme string to synthesize")
     parser.add_argument("--transcript", type=str, default="", help="Phoneme transcript of the reference audio")
-    parser.add_argument("--audio", type=str, required=True, help="Path to reference audio file")
-    parser.add_argument("--model", type=str, required=True, help="Path to Echo checkpoint")
+    parser.add_argument(
+        "--audio", type=str, default=None,
+        help="Path to reference audio file (requires Mimi to encode it)",
+    )
+    parser.add_argument(
+        "--codec", type=str, default=None,
+        help="Path to pre-computed reference codec (.npz with 'codes' array of shape (L, T))",
+    )
+    parser.add_argument("--model", type=str, default=None, help="Path to Echo checkpoint (random init if omitted)")
     parser.add_argument("--output", type=str, default="output.wav", help="Output audio file")
     parser.add_argument("--max-steps", type=int, default=config.MAX_AUDIO_LENGTH, help="Max generation steps")
     parser.add_argument("--min-steps", type=int, default=0, help="Min generation steps before EOS allowed")
@@ -38,7 +45,12 @@ def main() -> None:
     print_info("Device", str(device))
     print()
 
-    # --- Mimi codec -----------------------------------------------------------
+    if args.audio is None and args.codec is None:
+        parser.error("one of --audio or --codec is required")
+    if args.audio is not None and args.codec is not None:
+        parser.error("--audio and --codec are mutually exclusive")
+
+    # --- Mimi codec (only needed if decoding audio or encoding on-the-fly) ----
     print_section("Loading Mimi codec")
     t0 = time.perf_counter()
     mimi = MimiModel.from_pretrained("kyutai/mimi").to(device).eval()
@@ -47,41 +59,58 @@ def main() -> None:
     print_info("Sample rate", f"{sr} Hz")
     print_info("Load time", f"{time.perf_counter() - t0:.1f}s")
 
-    # --- Reference audio → codec ----------------------------------------------
-    print_section("Encoding reference audio")
-    audio, _ = librosa.load(args.audio, sr=sr, mono=True)
-    print_info("Duration", f"{len(audio) / sr:.1f}s")
-
-    inputs = feature_extractor(raw_audio=audio, sampling_rate=sr, return_tensors="pt")
-    with torch.no_grad():
-        enc = mimi.encode(inputs["input_values"].to(device))
-    ref_codes = enc.audio_codes[:, : args.layers, :]            # (1, L, T)
-    ref_codes = ref_codes.permute(0, 2, 1)                      # (1, T, L)
+    # --- Reference codec -------------------------------------------------------
+    print_section("Loading reference codec")
+    if args.codec:
+        codec_path = Path(args.codec)
+        if not codec_path.is_file():
+            print(f"Codec file not found: {codec_path}", file=sys.stderr)
+            sys.exit(1)
+        codes = np.load(codec_path)["codes"]                    # (L, T)
+        ref_codes = torch.from_numpy(codes[:args.layers].T).long()  # (T, L)
+        ref_codes = ref_codes.unsqueeze(0)                       # (1, T, L)
+        print_info("Source", str(codec_path))
+    else:
+        audio, _ = librosa.load(args.audio, sr=sr, mono=True)
+        print_info("Duration", f"{len(audio) / sr:.1f}s")
+        inputs = feature_extractor(raw_audio=audio, sampling_rate=sr, return_tensors="pt")
+        with torch.no_grad():
+            enc = mimi.encode(inputs["input_values"].to(device))
+        ref_codes = enc.audio_codes[:, : args.layers, :]         # (1, L, T)
+        ref_codes = ref_codes.permute(0, 2, 1)                   # (1, T, L)
+        print_info("Source", args.audio)
     print_info("Codec shape", str(list(ref_codes.shape)))
 
     # --- Echo model -----------------------------------------------------------
     print_section("Loading Echo model")
     model = Echo()
-    ckpt = torch.load(args.model, map_location=device, weights_only=True)
-    model.load_state_dict(ckpt["model_state_dict"])
+    if args.model:
+        ckpt = torch.load(args.model, map_location=device, weights_only=True)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print_info("Checkpoint", args.model)
+    else:
+        print_info("Checkpoint", "(random init — no checkpoint provided)")
     model = model.to(device).eval()
-    print_info("Checkpoint", args.model)
 
     # --- Text → tokens --------------------------------------------------------
-    full_text = (args.transcript + " " + args.text).strip()
     tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")
-    text_ids = tokenizer.tokenize(full_text)
+    ref_text_ids = tokenizer.tokenize(args.transcript)
+    text_ids = tokenizer.tokenize(args.text)
+    ref_text_tensor = torch.tensor([ref_text_ids], dtype=torch.long, device=device)
     text_tensor = torch.tensor([text_ids], dtype=torch.long, device=device)
-    print_info("Phonemes", full_text[:80] + ("..." if len(full_text) > 80 else ""))
-    print_info("Text tokens", str(len(text_ids)))
+    print_info("Ref phonemes", (args.transcript[:80] + "...") if len(args.transcript) > 80 else args.transcript)
+    print_info("Ref text tokens", str(len(ref_text_ids)))
+    print_info("Target phonemes", (args.text[:80] + "...") if len(args.text) > 80 else args.text)
+    print_info("Target text tokens", str(len(text_ids)))
 
     # --- Generate -------------------------------------------------------------
     print_section("Generating")
     t_gen = time.perf_counter()
     with torch.no_grad():
         frames, lengths = model.generate(
+            ref_text_tensor,
+            ref_codes.to(device),
             text_tensor,
-            audio_codec=ref_codes.to(device),
             max_steps=args.max_steps,
             min_steps=args.min_steps,
             temperature=args.temperature,

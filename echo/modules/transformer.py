@@ -38,11 +38,12 @@ class DecoderBlock(nn.Module):
         self,
         x: torch.Tensor,
         kv_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
         # Casual self-attention.
         # Pre-norm style - that is, instead of applying the norm after final FNN,
         # we apply it at the beginning of the next block.
-        attn_out, new_kv = self.attn(self.norm1(x), kv_cache)
+        attn_out, new_kv = self.attn(self.norm1(x), kv_cache, key_padding_mask)
         
 		# Add 
         x = x + attn_out
@@ -78,6 +79,7 @@ class TransformerDecoder(nn.Module):
         self,
         x: torch.Tensor,
         kv_cache: Optional[KVCache] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, KVCache]:
         # This might seem confusing, but basically when we don't use KV cache (that is, kv_cache=None),
         # if becomes a list of Nones instead, and stays like that till the end.
@@ -88,7 +90,7 @@ class TransformerDecoder(nn.Module):
 		# A sequential execution block by block.
         new_cache: KVCache = []
         for block, cached_kv in zip(self.blocks, kv_cache):
-            x, new_kv = block(x, cached_kv)
+            x, new_kv = block(x, cached_kv, key_padding_mask)
             new_cache.append(new_kv)
 
         x = self.norm(x)
