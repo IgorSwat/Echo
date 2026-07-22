@@ -33,7 +33,7 @@ def collate_fn(
     texts, audios = list(texts), list(audios)
 
     B = len(texts)
-    C = config.NUM_CODEBOOKS
+    C = config.num_codebooks
 
     # Shared reference: drawn from the whole dataset, independent of the batch.
     if dataset is None:
@@ -54,13 +54,13 @@ def collate_fn(
 
     # Pad text targets.
     T_text = max(t.size(0) for t in texts)
-    padded_texts = torch.full((B, T_text), config.TEXT_PAD_ID, dtype=torch.long)
+    padded_texts = torch.full((B, T_text), config.text_pad_id, dtype=torch.long)
     for i, t in enumerate(texts):
         padded_texts[i, : t.size(0)] = t
 
     # Pad audio targets.
     T_audio = max(a.size(0) for a in audios)
-    padded_audios = torch.full((B, T_audio, C), config.CODEC_PAD_ID, dtype=torch.long)
+    padded_audios = torch.full((B, T_audio, C), config.audio_pad_id, dtype=torch.long)
     for i, a in enumerate(audios):
         padded_audios[i, : a.size(0)] = a
 

@@ -35,7 +35,7 @@ class FeedForward(nn.Module):
     def _init_weights(self) -> None:
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, mean=0.0, std=config.INIT_STD)
+                nn.init.normal_(m.weight, mean=0.0, std=config.init_std)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 

@@ -47,7 +47,7 @@ class PredictionHead(nn.Module):
     def _init_weights(self) -> None:
         for module in self.net:
             if isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, mean=0.0, std=config.INIT_STD)
+                nn.init.normal_(module.weight, mean=0.0, std=config.init_std)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
@@ -127,7 +127,7 @@ class FusedPredictionMultihead(nn.Module):
 
     def _init_weights(self) -> None:
         for w, b in zip(self.weights, self.biases):
-            nn.init.normal_(w, mean=0.0, std=config.INIT_STD)
+            nn.init.normal_(w, mean=0.0, std=config.init_std)
             nn.init.zeros_(b)
 
     def forward(

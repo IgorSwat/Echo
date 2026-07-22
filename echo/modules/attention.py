@@ -40,9 +40,9 @@ class CausalSelfAttention(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        nn.init.normal_(self.qkv.weight, mean=0.0, std=config.INIT_STD)
+        nn.init.normal_(self.qkv.weight, mean=0.0, std=config.init_std)
         nn.init.zeros_(self.qkv.bias)
-        nn.init.normal_(self.proj.weight, mean=0.0, std=config.INIT_STD)
+        nn.init.normal_(self.proj.weight, mean=0.0, std=config.init_std)
         nn.init.zeros_(self.proj.bias)
 
     def forward(

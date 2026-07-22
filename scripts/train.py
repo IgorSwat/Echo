@@ -15,6 +15,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from echo.model import Echo
+from echo.config import EchoConfig
 from echo.tokenizer import Tokenizer
 from echo.training.dataset import EchoDataset
 from echo.training.collate import collate_fn
@@ -23,41 +24,14 @@ from echo.training.collate import collate_fn
 IGNORE_INDEX = -100
 
 
-def _load_config(path: str) -> dict:
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _build_model(cfg: dict) -> Echo:
-    return Echo(
-        text_vocab_size=cfg["vocab_size"]["text"],
-        text_emb_dim=cfg["embedding_dim"],
-        d_emb=cfg["embedding_dim"],
-        d_model=cfg["decoder"]["hidden_dim"],
-        d_repr=cfg["intermediate_dim"],
-        num_layers=cfg["decoder"]["no_layers"],
-        num_heads=cfg["decoder"]["no_heads"],
-        ffn_dim=cfg["decoder"]["ffn_dim"],
-        dropout=cfg["decoder"]["dropout"],
-        num_pred_heads=cfg["heads"]["no_heads"],
-        pred_hidden_dim=cfg["heads"]["hidden_dim"],
-        codec_logit_dim=cfg["heads"]["logit_dim"],
-        pred_num_layers=cfg["heads"]["no_layers"],
-        pred_dropout=cfg["heads"]["dropout"],
-    )
-
-
 def _build_dataloaders(
-    cfg: dict,
+    cfg: EchoConfig,
     root: Path,
-    batch_size: int,
-    val_fraction: float,
 ) -> tuple[DataLoader, DataLoader | None]:
     tokenizer = Tokenizer(root / "models" / "phoneme_vocab.json")
-    tc = cfg["training"]
     ds = EchoDataset(
-        Path(tc["phonemes_csv"]),
-        Path(tc["codec_dir"]),
+        Path(cfg.training_phonemes_csv),
+        Path(cfg.training_codec_dir),
         tokenizer,
     )
 
@@ -66,15 +40,15 @@ def _build_dataloaders(
     # training set, not just from the current batch.
     collate = partial(collate_fn, dataset=ds)
 
-    if val_fraction > 0:
-        val_size = max(1, int(len(ds) * val_fraction))
+    if cfg.training_val_fraction > 0:
+        val_size = max(1, int(len(ds) * cfg.training_val_fraction))
         train_size = len(ds) - val_size
         train_ds, val_ds = random_split(ds, [train_size, val_size])
-        val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate, drop_last=False)
-        train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate, drop_last=True)
+        val_dl = DataLoader(val_ds, batch_size=cfg.training_batch_size, shuffle=False, collate_fn=collate, drop_last=False)
+        train_dl = DataLoader(train_ds, batch_size=cfg.training_batch_size, shuffle=True, collate_fn=collate, drop_last=True)
         return train_dl, val_dl
 
-    train_dl = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate, drop_last=True)
+    train_dl = DataLoader(ds, batch_size=cfg.training_batch_size, shuffle=True, collate_fn=collate, drop_last=True)
     return train_dl, None
 
 
@@ -154,8 +128,7 @@ def main() -> None:
     args = parser.parse_args()
 
     root = _REPO_ROOT
-    cfg = _load_config(str(root / args.config))
-    train_cfg = cfg["training"]
+    cfg = EchoConfig.from_json(str(root / args.config))
 
     # Select the best available device
     if torch.cuda.is_available():
@@ -169,7 +142,7 @@ def main() -> None:
     print(f"config: {args.config}")
 
     # Build the model from provided config
-    model = _build_model(cfg)
+    model = Echo(cfg)
     if args.checkpoint:
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
         if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
@@ -182,7 +155,7 @@ def main() -> None:
     print(f"parameters: {total_params / 1e6:.1f}M")
 
     # Build the dataset from provided path and config setup
-    train_dl, val_dl = _build_dataloaders(cfg, root, train_cfg["batch_size"], train_cfg["val_fraction"])
+    train_dl, val_dl = _build_dataloaders(cfg, root)
     print(f"batches per epoch: {len(train_dl)}")
     if val_dl:
         print(f"val batches: {len(val_dl)}")
@@ -190,13 +163,12 @@ def main() -> None:
     # Build optimizer
     opt = torch.optim.AdamW(
         model.parameters(), 
-        lr=train_cfg["learning_rate"], 
-        weight_decay=train_cfg["weight_decay"]
+        lr=cfg.training_learning_rate, 
+        weight_decay=cfg.training_weight_decay
     )
 
-    total_steps = train_cfg["num_epochs"] * len(train_dl)
-    warmup_fraction = train_cfg["warmup_fraction"]
-    warmup_steps = int(warmup_fraction * total_steps)
+    total_steps = cfg.training_num_epochs * len(train_dl)
+    warmup_steps = int(cfg.training_warmup_fraction * total_steps)
 
     # Build scheduler
     def _lr_schedule(step: int) -> float:
@@ -207,12 +179,12 @@ def main() -> None:
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, _lr_schedule)
 
-    output_dir = root / train_cfg["output_dir"]
+    output_dir = root / cfg.training_output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     global_step = 0
 
     # Main training loop
-    for epoch in range(train_cfg["num_epochs"]):
+    for epoch in range(cfg.training_num_epochs):
         epoch_start = time.perf_counter()
         epoch_loss = 0.0
 
@@ -224,20 +196,20 @@ def main() -> None:
             text_lengths = text_lengths.to(device)
             audio_lengths = audio_lengths.to(device)
 
-            eos_id = cfg["special_tokens"]["eos"]
+            eos_id = cfg.eos_id
             logits = model(ref_text, ref_audio, texts, audio_codec, text_lengths, audio_lengths)
             targets = _build_targets(audio_codec, audio_lengths, eos_id)
 
             loss = _compute_loss(
                 logits, targets,
-                weighted=train_cfg["weighted_loss"],
-                decay=train_cfg["loss_decay"],
+                weighted=cfg.training_weighted_loss,
+                decay=cfg.training_loss_decay,
             )
 
             opt.zero_grad()
             loss.backward()
 
-            grad_clip = train_cfg["grad_clip"]
+            grad_clip = cfg.training_grad_clip
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
@@ -247,7 +219,7 @@ def main() -> None:
             epoch_loss += loss.item()
             global_step += 1
 
-            if global_step % train_cfg["log_interval"] == 0:
+            if global_step % cfg.training_log_interval == 0:
                 lr = scheduler.get_last_lr()[0]
                 print(f"  step {global_step:6d} | loss {loss.item():.4f} | lr {lr:.2e}")
 
@@ -257,13 +229,13 @@ def main() -> None:
 
         if val_dl:
             val_loss = _validate(model, val_dl, eos_id, device,
-                                 weighted=train_cfg["weighted_loss"], decay=train_cfg["loss_decay"])
+                                 weighted=cfg.training_weighted_loss, decay=cfg.training_loss_decay)
             status += f" | val loss {val_loss:.4f}"
 
         print(f"{status} | time {elapsed:.1f}s")
 
-        save_every = train_cfg["save_interval"]
-        is_last = epoch == train_cfg["num_epochs"] - 1
+        save_every = cfg.training_save_interval
+        is_last = epoch == cfg.training_num_epochs - 1
         if is_last or (save_every > 0 and (epoch + 1) % save_every == 0):
             ckpt = {
                 "epoch": epoch + 1,

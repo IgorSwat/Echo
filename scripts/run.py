@@ -34,7 +34,7 @@ def main() -> None:
     )
     parser.add_argument("--model", type=str, default=None, help="Path to Echo checkpoint (random init if omitted)")
     parser.add_argument("--output", type=str, default="output.wav", help="Output audio file")
-    parser.add_argument("--max-steps", type=int, default=config.MAX_AUDIO_LENGTH, help="Max generation steps")
+    parser.add_argument("--max-steps", type=int, default=config.max_audio_length, help="Max generation steps")
     parser.add_argument("--min-steps", type=int, default=0, help="Min generation steps before EOS allowed")
     parser.add_argument("--layers", type=int, default=16, help="Mimi codec layers")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (0 = greedy)")

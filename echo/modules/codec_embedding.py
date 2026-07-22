@@ -52,13 +52,13 @@ class CodecEmbedding(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        nn.init.normal_(self.embedding.weight, mean=0.0, std=config.INIT_STD)
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=config.init_std)
         for c in range(self.num_codebook_layers):
-            nn.init.zeros_(self.embedding.weight[c * self.vocab_size + config.CODEC_PAD_ID])
+            nn.init.zeros_(self.embedding.weight[c * self.vocab_size + config.audio_pad_id])
 
         for m in self.fuse_mlp:
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, mean=0.0, std=config.INIT_STD)
+                nn.init.normal_(m.weight, mean=0.0, std=config.init_std)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
@@ -72,7 +72,7 @@ class CodecEmbedding(nn.Module):
         embedding = self.embedding(indices)
 
         # Mask-out the pad tokens
-        return embedding.masked_fill((codes == config.CODEC_PAD_ID).unsqueeze(-1), 0.0)
+        return embedding.masked_fill((codes == config.audio_pad_id).unsqueeze(-1), 0.0)
 
     def forward(self, codes: torch.Tensor, fuse: bool = True) -> torch.Tensor:
         """

@@ -1,79 +1,141 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
-_cfg_path = Path(__file__).resolve().parent.parent / "models" / "config.json"
-_cfg = json.loads(_cfg_path.read_text(encoding="utf-8"))
 
-# ---------------------------------------------------------------------------
-# Codebook geometry
-# ---------------------------------------------------------------------------
-NUM_CODEBOOKS: int = _cfg["num_codebooks"]
-CODEC_VOCAB_SIZE: int = _cfg["vocab_size"]["audio"]
-TEXT_VOCAB_SIZE: int = _cfg["vocab_size"]["text"]
+@dataclass
+class EchoConfig:
+    # Codebook geometry
+    num_codebooks: int
+    text_vocab_size: int
+    audio_vocab_size: int
 
-# ---------------------------------------------------------------------------
-# Sequence bounds
-# ---------------------------------------------------------------------------
-MAX_AUDIO_LENGTH: int = _cfg["limits"]["audio_seq_len"]
-MAX_TEXT_LENGTH: int = _cfg["limits"]["text_seq_len"]
-# Upper bound on the full embedded sequence length:
-#   <BOS> + ref_text + <REF_TEXT_EOS> + ref_audio + <REF_CODEC_EOS>
-#   + text + <TEXT_EOS> + audio
-MAX_SEQ_LEN: int = 2 * MAX_TEXT_LENGTH + 2 * MAX_AUDIO_LENGTH + 4
+    # Sequence bounds
+    max_text_length: int
+    max_audio_length: int
 
-# ---------------------------------------------------------------------------
-# Special tokens
-# ---------------------------------------------------------------------------
-TEXT_PAD_ID: int = _cfg["special_tokens"]["text_pad"]
-CODEC_PAD_ID: int = _cfg["special_tokens"]["audio_pad"]
-BOS_ID = _cfg["special_tokens"]["bos"]
-REF_TEXT_EOS_ID = _cfg["special_tokens"]["ref_text_eos"]
-REF_CODEC_EOS_ID = _cfg["special_tokens"]["ref_codec_eos"]
-TEXT_EOS_ID = _cfg["special_tokens"]["text_eos"]
-EOS_ID = _cfg["special_tokens"]["eos"]
+    # Special tokens
+    text_pad_id: int
+    audio_pad_id: int
+    bos_id: int
+    ref_text_eos_id: int
+    ref_codec_eos_id: int
+    text_eos_id: int
+    eos_id: int
 
-CODEC_LOGIT_DIM: int = CODEC_VOCAB_SIZE + 1   # + extra EOS token which does not apper in input sequences
+    # Dimensions
+    embedding_dim: int
+    intermediate_dim: int
+    init_std: float
 
-# ---------------------------------------------------------------------------
-# Dimensions
-# ---------------------------------------------------------------------------
-D_EMB: int = _cfg["embedding_dim"]
-D_MODEL: int = _cfg["decoder"]["hidden_dim"]
-D_REPR: int = _cfg["intermediate_dim"]
+    # Decoder
+    decoder_num_layers: int
+    decoder_num_heads: int
+    decoder_hidden_dim: int
+    decoder_ffn_dim: int
+    decoder_ffn_glu: bool
+    decoder_dropout: float
 
-DROPOUT: float = _cfg["decoder"]["dropout"]
+    # Codec embedding
+    codec_token_embedding_dim: int
+    codec_mlp_hidden_dim: int
+    codec_mlp_num_layers: int
+    codec_mlp_dropout: float
 
-# ---------------------------------------------------------------------------
-# Embedding tables
-# ---------------------------------------------------------------------------
-TEXT_EMB_DIM: int = D_EMB
-TEXT_POS_SIZE: int = MAX_TEXT_LENGTH
-CODEC_TOKEN_EMB_DIM: int = _cfg["codec_embedding"]["token_embedding_dim"]
-CODEC_EMB_DIM: int = D_EMB
-CODEC_POS_SIZE: int = MAX_AUDIO_LENGTH
-CODEC_MLP_HIDDEN_DIM: int = _cfg["codec_embedding"]["mlp_hidden_dim"]
-CODEC_MLP_NUM_LAYERS: int = _cfg["codec_embedding"]["mlp_num_layers"]
-CODEC_MLP_DROPOUT: float = _cfg["codec_embedding"]["mlp_dropout"]
+    # Prediction heads
+    pred_num_heads: int
+    pred_hidden_dim: int
+    pred_num_layers: int
+    pred_dropout: float
 
-# ---------------------------------------------------------------------------
-# Transformer decoder
-# ---------------------------------------------------------------------------
-NUM_LAYERS: int = _cfg["decoder"]["no_layers"]
-NUM_HEADS: int = _cfg["decoder"]["no_heads"]
-FFN_DIM: int = _cfg["decoder"]["ffn_dim"]
-FFN_GLU: bool = _cfg["decoder"]["ffn_glu"]
+    # Training
+    training_learning_rate: float
+    training_batch_size: int
+    training_num_epochs: int
+    training_warmup_fraction: float
+    training_weight_decay: float
+    training_grad_clip: float
+    training_weighted_loss: bool
+    training_loss_decay: float
+    training_log_interval: int
+    training_save_interval: int
+    training_val_fraction: float
+    training_phonemes_csv: str
+    training_codec_dir: str
+    training_output_dir: str
 
-# ---------------------------------------------------------------------------
-# Prediction heads
-# ---------------------------------------------------------------------------
-PRED_NUM_HEADS: int = _cfg["heads"]["no_heads"]
-PRED_HIDDEN_DIM: int = _cfg["heads"]["hidden_dim"]
-PRED_NUM_LAYERS: int = _cfg["heads"]["no_layers"]
-PRED_DROPOUT: float = _cfg["heads"]["dropout"]
+    @property
+    def max_seq_len(self) -> int:
+        return 2 * self.max_text_length + 2 * self.max_audio_length + 4
 
-# ---------------------------------------------------------------------------
-# Weight init
-# ---------------------------------------------------------------------------
-INIT_STD: float = _cfg["init_std"]
+    @property
+    def codec_logit_dim(self) -> int:
+        return self.audio_vocab_size + 1
+
+    @property
+    def codec_vocab_size(self) -> int:
+        return self.audio_vocab_size
+
+    @property
+    def codec_embedding_dim(self) -> int:
+        return self.embedding_dim
+
+    # Factory method
+    @classmethod
+    def from_json(cls, path: str | Path) -> EchoConfig:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+
+        return cls(
+            num_codebooks=d["num_codebooks"],
+            text_vocab_size=d["vocab_size"]["text"],
+            audio_vocab_size=d["vocab_size"]["audio"],
+            max_text_length=d["limits"]["text_seq_len"],
+            max_audio_length=d["limits"]["audio_seq_len"],
+            text_pad_id=d["special_tokens"]["text_pad"],
+            audio_pad_id=d["special_tokens"]["audio_pad"],
+            bos_id=d["special_tokens"]["bos"],
+            ref_text_eos_id=d["special_tokens"]["ref_text_eos"],
+            ref_codec_eos_id=d["special_tokens"]["ref_codec_eos"],
+            text_eos_id=d["special_tokens"]["text_eos"],
+            eos_id=d["special_tokens"]["eos"],
+            embedding_dim=d["embedding_dim"],
+            intermediate_dim=d["intermediate_dim"],
+            init_std=d["init_std"],
+            decoder_num_layers=d["decoder"]["no_layers"],
+            decoder_num_heads=d["decoder"]["no_heads"],
+            decoder_hidden_dim=d["decoder"]["hidden_dim"],
+            decoder_ffn_dim=d["decoder"]["ffn_dim"],
+            decoder_ffn_glu=d["decoder"]["ffn_glu"],
+            decoder_dropout=d["decoder"]["dropout"],
+            codec_token_embedding_dim=d["codec_embedding"]["token_embedding_dim"],
+            codec_mlp_hidden_dim=d["codec_embedding"]["mlp_hidden_dim"],
+            codec_mlp_num_layers=d["codec_embedding"]["mlp_num_layers"],
+            codec_mlp_dropout=d["codec_embedding"]["mlp_dropout"],
+            pred_num_heads=d["heads"]["no_heads"],
+            pred_hidden_dim=d["heads"]["hidden_dim"],
+            pred_num_layers=d["heads"]["no_layers"],
+            pred_dropout=d["heads"]["dropout"],
+            training_learning_rate=d["training"]["learning_rate"],
+            training_batch_size=d["training"]["batch_size"],
+            training_num_epochs=d["training"]["num_epochs"],
+            training_warmup_fraction=d["training"]["warmup_fraction"],
+            training_weight_decay=d["training"]["weight_decay"],
+            training_grad_clip=d["training"]["grad_clip"],
+            training_weighted_loss=d["training"]["weighted_loss"],
+            training_loss_decay=d["training"]["loss_decay"],
+            training_log_interval=d["training"]["log_interval"],
+            training_save_interval=d["training"]["save_interval"],
+            training_val_fraction=d["training"]["val_fraction"],
+            training_phonemes_csv=d["training"]["phonemes_csv"],
+            training_codec_dir=d["training"]["codec_dir"],
+            training_output_dir=d["training"]["output_dir"],
+        )
+
+
+# Default instance loaded from the canonical config JSON.
+config: EchoConfig = EchoConfig.from_json(
+    Path(__file__).resolve().parent.parent / "models" / "config.json"
+)

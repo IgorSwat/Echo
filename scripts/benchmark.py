@@ -74,10 +74,10 @@ def main() -> None:
     torch.set_float32_matmul_precision("high")
 
     ref_text = torch.randint(
-        0, config.TEXT_VOCAB_SIZE, (BATCH, FIXED_REF_TEXT_LEN), device=DEVICE
+        0, config.text_vocab_size, (BATCH, FIXED_REF_TEXT_LEN), device=DEVICE
     ).long()
     ref_audio = torch.randint(
-        0, config.CODEC_PAD_ID, (BATCH, FIXED_REF_AUDIO_LEN, config.NUM_CODEBOOKS), device=DEVICE
+        0, config.audio_pad_id, (BATCH, FIXED_REF_AUDIO_LEN, config.num_codebooks), device=DEVICE
     ).long()
 
     text_lens = [32, 64, 128, 256]
@@ -91,8 +91,8 @@ def main() -> None:
 
     for tlen in text_lens:
         for alen in audio_lens:
-            text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
-            audio = torch.randint(0, config.CODEC_PAD_ID, (BATCH, alen, config.NUM_CODEBOOKS), device=DEVICE).long()
+            text = torch.randint(0, config.text_vocab_size, (BATCH, tlen), device=DEVICE).long()
+            audio = torch.randint(0, config.audio_pad_id, (BATCH, alen, config.num_codebooks), device=DEVICE).long()
             text_lengths = torch.full((BATCH,), tlen, dtype=torch.long, device=DEVICE)
             audio_lengths = torch.full((BATCH,), alen, dtype=torch.long, device=DEVICE)
 
@@ -113,7 +113,7 @@ def main() -> None:
     print_separator(width=len(header))
 
     for tlen in text_lens:
-        text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
+        text = torch.randint(0, config.text_vocab_size, (BATCH, tlen), device=DEVICE).long()
 
         def _prefill(text=text):
             return model.prefill(ref_text, ref_audio, text)
@@ -132,11 +132,11 @@ def main() -> None:
     print_separator(width=len(header))
 
     for tlen in [32, 128, 256]:
-        text = torch.randint(0, config.TEXT_VOCAB_SIZE, (BATCH, tlen), device=DEVICE).long()
+        text = torch.randint(0, config.text_vocab_size, (BATCH, tlen), device=DEVICE).long()
         _, kv_cache = model.prefill(ref_text, ref_audio, text)
         start_pos = 1 + FIXED_REF_TEXT_LEN + 1 + FIXED_REF_AUDIO_LEN + 1 + tlen + 1
 
-        frame = torch.randint(0, config.CODEC_PAD_ID, (BATCH, config.NUM_CODEBOOKS), device=DEVICE).long()
+        frame = torch.randint(0, config.audio_pad_id, (BATCH, config.num_codebooks), device=DEVICE).long()
 
         def _step():
             return model.step(frame, position=start_pos, kv_cache=kv_cache)

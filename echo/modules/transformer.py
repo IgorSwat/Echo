@@ -32,7 +32,7 @@ class DecoderBlock(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         self.attn = CausalSelfAttention(d_model, num_heads, dropout)
         self.norm2 = nn.LayerNorm(d_model)
-        self.ffn = FeedForward(d_model, ffn_dim, dropout, config.FFN_GLU)
+        self.ffn = FeedForward(d_model, ffn_dim, dropout, config.decoder_ffn_glu)
 
     def forward(
         self,

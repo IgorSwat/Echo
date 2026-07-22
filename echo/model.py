@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from echo import config
+from echo.config import EchoConfig
 from echo.modules.codec_embedding import CodecEmbedding
 from echo.modules.transformer import TransformerDecoder
 from echo.modules.prediction_heads import PredictionMultihead, FusedPredictionMultihead
@@ -16,90 +17,67 @@ import torch.nn as nn
 
 class Echo(nn.Module):
 
-    def __init__(
-        self,
-        text_vocab_size: int = config.TEXT_VOCAB_SIZE,
-        text_emb_dim: int = config.TEXT_EMB_DIM,
-        d_emb: int = config.D_EMB,
-        d_model: int = config.D_MODEL,
-        d_repr: int = config.D_REPR,
-        num_layers: int = config.NUM_LAYERS,
-        num_heads: int = config.NUM_HEADS,
-        ffn_dim: int = config.FFN_DIM,
-        dropout: float = config.DROPOUT,
-        num_pred_heads: int = config.PRED_NUM_HEADS,
-        pred_hidden_dim: int = config.PRED_HIDDEN_DIM,
-        codec_logit_dim: int = config.CODEC_LOGIT_DIM,
-        pred_num_layers: int = config.PRED_NUM_LAYERS,
-        pred_dropout: float = config.PRED_DROPOUT,
-        max_seq_len: int = config.MAX_SEQ_LEN,
-    ) -> None:
+    def __init__(self, cfg: EchoConfig = config) -> None:
         super().__init__()
+        self.cfg = cfg
 
         # Reusable size information
-        self.d_emb = d_emb
-        self.d_model = d_model
-        self.d_repr = d_repr
-        self.num_pred_heads = num_pred_heads
-        self.token_embedding_dim = config.CODEC_TOKEN_EMB_DIM
+        self.d_emb = cfg.embedding_dim
+        self.d_model = cfg.decoder_hidden_dim
+        self.d_repr = cfg.intermediate_dim
+        self.num_pred_heads = cfg.pred_num_heads
+        self.token_embedding_dim = cfg.codec_token_embedding_dim
 
         # Embeddings
-        # - Text embeddings - simple Embedding table (no positional).
-        # - Audio (codec) embeddings - specialized per-codebook embeddings (no positional).
-        # - Special token embeddings - one learnable vector per special token, hardcoded here.
-        # - Joint learned positional embeddings applied to the entire sequence.
-        self.text_embed = TextEmbedding(text_vocab_size, text_emb_dim)
+        self.text_embed = TextEmbedding(cfg.text_vocab_size, cfg.embedding_dim)
         self.codec_embed = CodecEmbedding(
-            vocab_size=codec_logit_dim - 1,
-            num_codebook_layers=num_pred_heads,
-            token_embedding_dim=config.CODEC_TOKEN_EMB_DIM,
-            codebook_embedding_dim=config.CODEC_EMB_DIM,
-            mlp_hidden_dim=config.CODEC_MLP_HIDDEN_DIM,
-            mlp_num_layers=config.CODEC_MLP_NUM_LAYERS,
-            mlp_dropout=config.CODEC_MLP_DROPOUT,
+            vocab_size=cfg.codec_logit_dim - 1,
+            num_codebook_layers=cfg.pred_num_heads,
+            token_embedding_dim=cfg.codec_token_embedding_dim,
+            codebook_embedding_dim=cfg.codec_embedding_dim,
+            mlp_hidden_dim=cfg.codec_mlp_hidden_dim,
+            mlp_num_layers=cfg.codec_mlp_num_layers,
+            mlp_dropout=cfg.codec_mlp_dropout,
         )
 
-        self.bos_embed = nn.Parameter(torch.empty(d_emb))
-        self.ref_text_eos_embed = nn.Parameter(torch.empty(d_emb))
-        self.ref_codec_eos_embed = nn.Parameter(torch.empty(d_emb))
-        self.text_eos_embed = nn.Parameter(torch.empty(d_emb))
+        self.bos_embed = nn.Parameter(torch.empty(cfg.embedding_dim))
+        self.ref_text_eos_embed = nn.Parameter(torch.empty(cfg.embedding_dim))
+        self.ref_codec_eos_embed = nn.Parameter(torch.empty(cfg.embedding_dim))
+        self.text_eos_embed = nn.Parameter(torch.empty(cfg.embedding_dim))
 
-        self.pos_embed = nn.Embedding(max_seq_len, d_emb)
+        self.pos_embed = nn.Embedding(cfg.max_seq_len, cfg.embedding_dim)
 
         # Dimension adapters
-        # Since transformer can operate on different internal dimension than embeddings,
-        # we use linear projections to match them (or nn.Identity if already matched).
-        self.input_proj = nn.Linear(d_emb, d_model) if d_emb != d_model else nn.Identity()
-        self.output_proj = nn.Linear(d_model, d_repr) if d_model != d_repr else nn.Identity()
-        self.codec_condition_proj = nn.Linear(self.token_embedding_dim, d_repr, bias=False)
+        self.input_proj = nn.Linear(cfg.embedding_dim, cfg.decoder_hidden_dim) if cfg.embedding_dim != cfg.decoder_hidden_dim else nn.Identity()
+        self.output_proj = nn.Linear(cfg.decoder_hidden_dim, cfg.intermediate_dim) if cfg.decoder_hidden_dim != cfg.intermediate_dim else nn.Identity()
+        self.codec_condition_proj = nn.Linear(self.token_embedding_dim, cfg.intermediate_dim, bias=False)
 
         # Transformer decoder
-        # The heart of the model.
         self.transformer = TransformerDecoder(
-            d_model=d_model,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            ffn_dim=ffn_dim,
-            dropout=dropout,
+            d_model=cfg.decoder_hidden_dim,
+            num_layers=cfg.decoder_num_layers,
+            num_heads=cfg.decoder_num_heads,
+            ffn_dim=cfg.decoder_ffn_dim,
+            dropout=cfg.decoder_dropout,
         )
 
         # Prediction heads
         self.heads = FusedPredictionMultihead(
-            num_heads=num_pred_heads,
-            in_dim=d_repr,
-            hidden_dim=pred_hidden_dim,
-            out_dim=codec_logit_dim,
-            num_layers=pred_num_layers,
-            dropout=pred_dropout,
+            num_heads=cfg.pred_num_heads,
+            in_dim=cfg.intermediate_dim,
+            hidden_dim=cfg.pred_hidden_dim,
+            out_dim=cfg.codec_logit_dim,
+            num_layers=cfg.pred_num_layers,
+            dropout=cfg.pred_dropout,
         )
 
         self._init_weights()
 
     def _init_weights(self) -> None:
         for p in (self.bos_embed, self.ref_text_eos_embed, self.ref_codec_eos_embed, self.text_eos_embed):
-            nn.init.normal_(p, mean=0.0, std=config.INIT_STD)
-        nn.init.normal_(self.pos_embed.weight, mean=0.0, std=config.INIT_STD)
-        nn.init.normal_(self.codec_condition_proj.weight, mean=0.0, std=config.INIT_STD)
+            nn.init.normal_(p, mean=0.0, std=self.cfg.init_std)
+        nn.init.normal_(self.pos_embed.weight, mean=0.0, std=self.cfg.init_std)
+        nn.init.normal_(self.codec_condition_proj.weight, mean=0.0, std=self.cfg.init_std)
 
     def _embed_prompt(
         self,
@@ -214,7 +192,6 @@ class Echo(nn.Module):
         conditioning = self.codec_condition_proj(previous)
         return self.heads(hidden, conditioning)
 
-
     def forward(
         self,
         ref_text: torch.Tensor,
@@ -242,7 +219,7 @@ class Echo(nn.Module):
         gathered = hidden.new_zeros((hidden.size(0), max_predictions, self.d_repr))
         prediction_codes = torch.full(
             (hidden.size(0), max_predictions, self.num_pred_heads),
-            config.CODEC_PAD_ID,
+            self.cfg.audio_pad_id,
             dtype=audio_codec.dtype,
             device=audio_codec.device,
         )
@@ -307,11 +284,11 @@ class Echo(nn.Module):
             logits = self.heads.forward_head(hidden, codebook, conditioning)
 
             if codebook == 0:
-                logits[:, config.CODEC_PAD_ID] = -torch.inf
+                logits[:, self.cfg.audio_pad_id] = -torch.inf
                 if not allow_eos:
                     logits[:, eos_id] = -torch.inf
             else:
-                logits[:, config.CODEC_PAD_ID:] = -torch.inf
+                logits[:, self.cfg.audio_pad_id:] = -torch.inf
 
             if greedy:
                 token = logits.argmax(dim=-1)
@@ -322,24 +299,21 @@ class Echo(nn.Module):
             if codebook == 0 and bool((token == eos_id).all()):
                 return frame, True
 
-            token_embedding = self.codec_embed.embed_codebooks(frame[:, None, :].clamp_max(config.CODEC_PAD_ID))
+            token_embedding = self.codec_embed.embed_codebooks(frame[:, None, :].clamp_max(self.cfg.audio_pad_id))
             previous_sum = token_embedding[:, 0, :codebook + 1].sum(dim=1)
 
         return frame, False
 
-    # ------------------------------------------------------------------
-    # Convenience: greedy generation loop (EOS checked on codebook 0)
-    # ------------------------------------------------------------------
     @torch.no_grad()
     def generate(
         self,
         ref_text: torch.Tensor,
         ref_audio_codec: torch.Tensor,
         text: torch.Tensor,
-        max_steps: int = config.MAX_AUDIO_LENGTH,
+        max_steps: int = config.max_audio_length,
         min_steps: int = 0,
         temperature: float = 1.0,
-        eos_id: int = config.EOS_ID,
+        eos_id: int = config.eos_id,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Iterative decoding for a single sequence.
