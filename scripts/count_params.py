@@ -99,13 +99,28 @@ def main() -> None:
     print_info("LayerNorm total", f"{_fmt(norm_total)} ({_pct(norm_total, total)})")
     print_info("Transformer subtotal", f"{_fmt(xfmr_total)} ({_pct(xfmr_total, total)})", Colors.OKCYAN)
 
-    # --- Prediction heads ---
-    print_section("Prediction heads")
-    heads_total = sum(p.numel() for p in model.heads.parameters())
-    num_heads = model.heads.num_heads
-    per_head = heads_total // num_heads
-    print_info("Per head", _fmt(per_head))
-    print_info(f"All {num_heads} heads", f"{_fmt(heads_total)} ({_pct(heads_total, total)})", Colors.OKCYAN)
+    # --- Codebook projector ---
+    print_section("Codebook projector")
+    proj_total = sum(p.numel() for p in model.projector.parameters())
+    proj_num_layers = len(model.projector.transformer.blocks)
+    proj_attn_total = 0
+    proj_ffn_total = 0
+    proj_norm_total = 0
+    for i, block in enumerate(model.projector.transformer.blocks):
+        a = sum(p.numel() for p in block.attn.parameters())
+        f = sum(p.numel() for p in block.ffn.parameters())
+        n = sum(p.numel() for p in block.norm1.parameters()) + sum(p.numel() for p in block.norm2.parameters())
+        proj_attn_total += a
+        proj_ffn_total += f
+        proj_norm_total += n
+        print_info(f"Block {i:2d}", f"{_fmt(a + f + n)}  (attn: {_fmt(a)}, FFN: {_fmt(f)})")
+    proj_other = proj_total - proj_attn_total - proj_ffn_total - proj_norm_total
+    print_info("Projections + embeddings", _fmt(proj_other))
+    print_separator()
+    print_info("Attention total", f"{_fmt(proj_attn_total)} ({_pct(proj_attn_total, total)})")
+    print_info("FFN total", f"{_fmt(proj_ffn_total)} ({_pct(proj_ffn_total, total)})")
+    print_info("LayerNorm total", f"{_fmt(proj_norm_total)} ({_pct(proj_norm_total, total)})")
+    print_info("Projector subtotal", f"{_fmt(proj_total)} ({_pct(proj_total, total)})", Colors.OKCYAN)
 
     print()
     print_header(f"Grand total: {_fmt(total)}")

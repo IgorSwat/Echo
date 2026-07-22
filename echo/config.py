@@ -44,11 +44,13 @@ class EchoConfig:
     codec_mlp_num_layers: int
     codec_mlp_dropout: float
 
-    # Prediction heads
-    pred_num_heads: int
-    pred_hidden_dim: int
-    pred_num_layers: int
-    pred_dropout: float
+    # Codebook projector
+    codebook_projector_no_context_chunks: int
+    codebook_projector_d_model: int
+    codebook_projector_num_layers: int
+    codebook_projector_num_heads: int
+    codebook_projector_ffn_dim: int
+    codebook_projector_dropout: float
 
     # Training
     training_learning_rate: float
@@ -114,10 +116,12 @@ class EchoConfig:
             codec_mlp_hidden_dim=d["codec_embedding"]["mlp_hidden_dim"],
             codec_mlp_num_layers=d["codec_embedding"]["mlp_num_layers"],
             codec_mlp_dropout=d["codec_embedding"]["mlp_dropout"],
-            pred_num_heads=d["heads"]["no_heads"],
-            pred_hidden_dim=d["heads"]["hidden_dim"],
-            pred_num_layers=d["heads"]["no_layers"],
-            pred_dropout=d["heads"]["dropout"],
+            codebook_projector_no_context_chunks=d["codebook_projector"]["no_context_chunks"],
+            codebook_projector_d_model=d["codebook_projector"]["d_model"],
+            codebook_projector_num_layers=d["codebook_projector"]["num_layers"],
+            codebook_projector_num_heads=d["codebook_projector"]["num_heads"],
+            codebook_projector_ffn_dim=d["codebook_projector"]["ffn_dim"],
+            codebook_projector_dropout=d["codebook_projector"]["dropout"],
             training_learning_rate=d["training"]["learning_rate"],
             training_batch_size=d["training"]["batch_size"],
             training_num_epochs=d["training"]["num_epochs"],

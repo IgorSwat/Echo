@@ -3,13 +3,12 @@ from __future__ import annotations
 from echo import config
 from echo.config import EchoConfig
 from echo.modules.codec_embedding import CodecEmbedding
+from echo.modules.codebook_projector import CodebookProjector
 from echo.modules.transformer import TransformerDecoder
-from echo.modules.prediction_heads import PredictionMultihead, FusedPredictionMultihead
 from echo.modules.text_embedding import TextEmbedding
 from echo.modules.types import KVCache
 
 from typing import Optional
-import math
 
 import torch
 import torch.nn as nn
@@ -25,14 +24,12 @@ class Echo(nn.Module):
         self.d_emb = cfg.embedding_dim
         self.d_model = cfg.decoder_hidden_dim
         self.d_repr = cfg.intermediate_dim
-        self.num_pred_heads = cfg.pred_num_heads
-        self.token_embedding_dim = cfg.codec_token_embedding_dim
 
         # Embeddings
         self.text_embed = TextEmbedding(cfg.text_vocab_size, cfg.embedding_dim)
         self.codec_embed = CodecEmbedding(
             vocab_size=cfg.codec_logit_dim - 1,
-            num_codebook_layers=cfg.pred_num_heads,
+            num_codebook_layers=cfg.num_codebooks,
             token_embedding_dim=cfg.codec_token_embedding_dim,
             codebook_embedding_dim=cfg.codec_embedding_dim,
             mlp_hidden_dim=cfg.codec_mlp_hidden_dim,
@@ -50,7 +47,6 @@ class Echo(nn.Module):
         # Dimension adapters
         self.input_proj = nn.Linear(cfg.embedding_dim, cfg.decoder_hidden_dim) if cfg.embedding_dim != cfg.decoder_hidden_dim else nn.Identity()
         self.output_proj = nn.Linear(cfg.decoder_hidden_dim, cfg.intermediate_dim) if cfg.decoder_hidden_dim != cfg.intermediate_dim else nn.Identity()
-        self.codec_condition_proj = nn.Linear(self.token_embedding_dim, cfg.intermediate_dim, bias=False)
 
         # Transformer decoder
         self.transformer = TransformerDecoder(
@@ -61,14 +57,18 @@ class Echo(nn.Module):
             dropout=cfg.decoder_dropout,
         )
 
-        # Prediction heads
-        self.heads = FusedPredictionMultihead(
-            num_heads=cfg.pred_num_heads,
-            in_dim=cfg.intermediate_dim,
-            hidden_dim=cfg.pred_hidden_dim,
-            out_dim=cfg.codec_logit_dim,
-            num_layers=cfg.pred_num_layers,
-            dropout=cfg.pred_dropout,
+        # Codebook projector
+        self.projector = CodebookProjector(
+            num_codebooks=cfg.num_codebooks,
+            no_context_chunks=cfg.codebook_projector_no_context_chunks,
+            d_model=cfg.codebook_projector_d_model,
+            token_embedding_dim=cfg.codec_token_embedding_dim,
+            d_context=cfg.intermediate_dim,
+            vocab_size=cfg.codec_logit_dim,
+            num_layers=cfg.codebook_projector_num_layers,
+            num_heads=cfg.codebook_projector_num_heads,
+            ffn_dim=cfg.codebook_projector_ffn_dim,
+            dropout=cfg.codebook_projector_dropout,
         )
 
         self._init_weights()
@@ -77,7 +77,6 @@ class Echo(nn.Module):
         for p in (self.bos_embed, self.ref_text_eos_embed, self.ref_codec_eos_embed, self.text_eos_embed):
             nn.init.normal_(p, mean=0.0, std=self.cfg.init_std)
         nn.init.normal_(self.pos_embed.weight, mean=0.0, std=self.cfg.init_std)
-        nn.init.normal_(self.codec_condition_proj.weight, mean=0.0, std=self.cfg.init_std)
 
     def _embed_prompt(
         self,
@@ -180,17 +179,14 @@ class Echo(nn.Module):
 
     def _predict(self, hidden: torch.Tensor, codes: torch.Tensor) -> torch.Tensor:
         """
-        Runs prediction heads.
+        Predict codec logits through the CodebookProjector.
 
-        Output: ``(B, ..., NUM_CODEBOOKS, CODEC_LOGIT_DIM)``
+        Output: ``(B, T, NUM_CODEBOOKS, CODEC_LOGIT_DIM)``
         """
 
-        codebook_embeddings = self.codec_embed.embed_codebooks(codes)
-        previous = codebook_embeddings.cumsum(dim=-2) - codebook_embeddings
-        counts = torch.arange(self.num_pred_heads, device=hidden.device).clamp(min=1).sqrt()
-        previous = previous / counts.view(*([1] * (previous.ndim - 2)), -1, 1)
-        conditioning = self.codec_condition_proj(previous)
-        return self.heads(hidden, conditioning)
+        embeddings = self.codec_embed.embed_codebooks(codes)
+        
+        return self.projector(embeddings, hidden)
 
     def forward(
         self,
@@ -218,7 +214,7 @@ class Echo(nn.Module):
         max_predictions = audio_codec.size(1) + 1
         gathered = hidden.new_zeros((hidden.size(0), max_predictions, self.d_repr))
         prediction_codes = torch.full(
-            (hidden.size(0), max_predictions, self.num_pred_heads),
+            (hidden.size(0), max_predictions, self.cfg.num_codebooks),
             self.cfg.audio_pad_id,
             dtype=audio_codec.dtype,
             device=audio_codec.device,
@@ -272,17 +268,16 @@ class Echo(nn.Module):
         allow_eos: bool,
         eos_id: int,
     ) -> tuple[torch.Tensor, bool]:
-        """Predict one frame, conditioning each codebook on earlier books."""
+        """Predict one frame autoregressively across codebook layers."""
         greedy = temperature < 1e-5
-        frame = torch.zeros((hidden.size(0), self.num_pred_heads), dtype=torch.long, device=hidden.device)
-        previous_sum = hidden.new_zeros((hidden.size(0), self.token_embedding_dim))
+        B = hidden.size(0)
+        C = self.cfg.num_codebooks
+        device = hidden.device
+        frame = torch.zeros(B, C, dtype=torch.long, device=device)
 
-        for codebook in range(self.num_pred_heads):
-            conditioning = None
-            if codebook > 0:
-                conditioning = self.codec_condition_proj(previous_sum / math.sqrt(codebook))
-            logits = self.heads.forward_head(hidden, codebook, conditioning)
+        logits = self.projector.prefill(hidden)                                # (B, V)
 
+        for codebook in range(C):
             if codebook == 0:
                 logits[:, self.cfg.audio_pad_id] = -torch.inf
                 if not allow_eos:
@@ -299,8 +294,9 @@ class Echo(nn.Module):
             if codebook == 0 and bool((token == eos_id).all()):
                 return frame, True
 
-            token_embedding = self.codec_embed.embed_codebooks(frame[:, None, :].clamp_max(self.cfg.audio_pad_id))
-            previous_sum = token_embedding[:, 0, :codebook + 1].sum(dim=1)
+            if codebook < C - 1:
+                tok_emb = self.codec_embed.embed_codebooks(frame[:, None, :])[:, 0, codebook]  # (B, Dt)
+                logits = self.projector.step(tok_emb)
 
         return frame, False
 
@@ -355,7 +351,7 @@ class Echo(nn.Module):
             hidden, kv_cache = self.step(frame_batch, position=start_pos + i, kv_cache=kv_cache)
 
         if not frames:
-            empty = torch.zeros(1, 0, self.num_pred_heads, dtype=torch.long, device=ref_text.device)
+            empty = torch.zeros(1, 0, self.cfg.num_codebooks, dtype=torch.long, device=ref_text.device)
             return empty, torch.tensor([0], device=ref_text.device)
 
         lengths = torch.tensor([len(frames)], device=ref_text.device)
