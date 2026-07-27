@@ -61,6 +61,9 @@ class EchoConfig:
     training_grad_clip: float
     training_weighted_loss: bool
     training_loss_decay: float
+    training_scheduled_sampling_start_epoch: int
+    training_scheduled_sampling_probability_increment: float
+    training_scheduled_sampling_max_probability: float
     training_log_interval: int
     training_save_interval: int
     training_val_fraction: float
@@ -130,6 +133,9 @@ class EchoConfig:
             training_grad_clip=d["training"]["grad_clip"],
             training_weighted_loss=d["training"]["weighted_loss"],
             training_loss_decay=d["training"]["loss_decay"],
+            training_scheduled_sampling_start_epoch=d["training"]["scheduled_sampling_start_epoch"],
+            training_scheduled_sampling_probability_increment=d["training"]["scheduled_sampling_probability_increment"],
+            training_scheduled_sampling_max_probability=d["training"]["scheduled_sampling_max_probability"],
             training_log_interval=d["training"]["log_interval"],
             training_save_interval=d["training"]["save_interval"],
             training_val_fraction=d["training"]["val_fraction"],

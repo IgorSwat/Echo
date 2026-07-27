@@ -38,7 +38,9 @@ class CodebookProjector(nn.Module):
 
         self.tok_proj = nn.Linear(token_embedding_dim, d_model)
         self.ctx_proj = nn.Linear(d_context, no_context_chunks * d_model)
-        self.head = nn.Linear(d_model, vocab_size)    # Prediction head for logits
+        self.heads = nn.ModuleList(
+            nn.Linear(d_model, vocab_size) for _ in range(num_codebooks)
+        )
 
         # Additional per-layer embeddings - maybe necessary, maybe not. Certainly cost almost nothing.
         self.pos_embed = nn.Embedding(self.seq_len, d_model) 
@@ -54,7 +56,7 @@ class CodebookProjector(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        for m in [self.tok_proj, self.ctx_proj, self.head]:
+        for m in [self.tok_proj, self.ctx_proj, *self.heads]:
             nn.init.normal_(m.weight, mean=0.0, std=config.init_std)
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
@@ -93,7 +95,10 @@ class CodebookProjector(nn.Module):
         out, _ = self.transformer(x, kv_cache=None)                         # (B*T, K+C, d_model)
 
         pred_hidden = out[:, K - 1 : K - 1 + C]                             # (B*T, C, d_model)
-        logits = self.head(pred_hidden)                                     # (B*T, C, V)
+        logits = torch.stack(
+            [head(pred_hidden[:, codebook]) for codebook, head in enumerate(self.heads)],
+            dim=1,
+        )                                                                    # (B*T, C, V)
 
         return logits.reshape(B, T, C, -1)
 
@@ -114,7 +119,7 @@ class CodebookProjector(nn.Module):
 
         # Based only on the context (splitted into chunks), we predict the first codebook token.
         out, _ = self.transformer(ctx, kv_cache=None)                       # (B, K, d_model)
-        first_token_logits = self.head(out[:, -1])		# (B, V)
+        first_token_logits = self.heads[0](out[:, -1])                       # (B, V)
         
         return first_token_logits
 
@@ -134,4 +139,4 @@ class CodebookProjector(nn.Module):
         x = torch.cat([self._ctx] + self._tokens, dim=1)                      # (B, K + c + 1, d_model)
         out, _ = self.transformer(x, kv_cache=None)                           # (B, K + c + 1, d_model)
 
-        return self.head(out[:, -1])                                           # (B, V)
+        return self.heads[c + 1](out[:, -1])                                  # (B, V)

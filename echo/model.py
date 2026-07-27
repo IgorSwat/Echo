@@ -184,10 +184,23 @@ class Echo(nn.Module):
         audio_codec: torch.Tensor,
         text_lengths: torch.Tensor,
         audio_lengths: torch.Tensor,
+        projector_audio_codec: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         A forward pass strictly for training.
+
+        ``audio_codec`` supplies temporal history to the main transformer.
+        ``projector_audio_codec`` supplies lower-codebook teacher tokens for
+        same-frame prediction and defaults to ``audio_codec``.
         """
+
+        if projector_audio_codec is None:
+            projector_audio_codec = audio_codec
+        if projector_audio_codec.shape != audio_codec.shape:
+            raise ValueError(
+                "projector_audio_codec must have the same shape as audio_codec, "
+                f"got {tuple(projector_audio_codec.shape)} and {tuple(audio_codec.shape)}"
+            )
 
         x, valid_mask, prediction_starts = self._embed_training_batch(
             ref_text,
@@ -204,14 +217,14 @@ class Echo(nn.Module):
         prediction_codes = torch.full(
             (hidden.size(0), max_predictions, self.cfg.num_codebooks),
             self.cfg.audio_pad_id,
-            dtype=audio_codec.dtype,
-            device=audio_codec.device,
+            dtype=projector_audio_codec.dtype,
+            device=projector_audio_codec.device,
         )
         for i in range(hidden.size(0)):
             count = int(audio_lengths[i].item()) + 1
             start = int(prediction_starts[i].item())
             gathered[i, :count] = hidden[i, start:start + count]
-            prediction_codes[i, :count - 1] = audio_codec[i, :count - 1]
+            prediction_codes[i, :count - 1] = projector_audio_codec[i, :count - 1]
 
         return self._predict(gathered, prediction_codes)
 

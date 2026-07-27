@@ -1,5 +1,5 @@
 {
-  "num_codebooks": 16,
+  "num_codebooks": 12,
 
   "vocab_size": {
     "text": 256,
@@ -41,27 +41,30 @@
   },
 
   "codebook_projector": {
-    "no_context_chunks": 4,
+    "no_context_chunks": 2,
     "d_model": 256,
-    "num_layers": 2,
+    "num_layers": 4,
     "num_heads": 4,
     "ffn_dim": 512,
-    "dropout": 0.3
+    "dropout": 0.1
   },
 
   "init_std": 0.02,
 
   "training": {
-    "learning_rate": 3e-4,
-    "batch_size": 8,
-    "num_epochs": 50,
-    "warmup_fraction": 0.02,
+    "learning_rate": 5e-4,
+    "batch_size": 16,
+    "num_epochs": 40,
+    "warmup_fraction": 0.01,
     "weight_decay": 0.05,
     "grad_clip": 1.0,
     "weighted_loss": true,
     "loss_decay": 0.9,
+    "scheduled_sampling_start_epoch": 10,
+    "scheduled_sampling_probability_increment": 0.01,
+    "scheduled_sampling_max_probability": 0.1,
     "log_interval": 50,
-    "save_interval": 2,
+    "save_interval": 5,
     "val_fraction": 0.1,
     "phonemes_csv": "data/norbi/phonemes.csv",
     "codec_dir": "data/norbi/codecs",
