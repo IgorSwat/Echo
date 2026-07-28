@@ -1,9 +1,8 @@
 {
-  "num_codebooks": 12,
+  "latent_dim": 24,
 
   "vocab_size": {
-    "text": 256,
-    "audio": 2049
+    "text": 256
   },
 
   "limits": {
@@ -13,23 +12,14 @@
 
   "special_tokens": {
     "text_pad": 0,
-    "audio_pad": 2048,
     "bos": 256,
     "ref_text_eos": 257,
-    "ref_codec_eos": 258,
-    "text_eos": 259,
-    "eos": 2049
+    "ref_audio_eos": 258,
+    "text_eos": 259
   },
 
   "embedding_dim": 512,
   "intermediate_dim": 512,
-
-  "codec_embedding": {
-    "token_embedding_dim": 128,
-    "mlp_hidden_dim": 1024,
-    "mlp_num_layers": 2,
-    "mlp_dropout": 0.1
-  },
 
   "decoder": {
     "no_layers": 12,
@@ -38,15 +28,6 @@
     "ffn_dim": 2048,
     "ffn_glu": false,
     "dropout": 0.2
-  },
-
-  "codebook_projector": {
-    "no_context_chunks": 2,
-    "d_model": 256,
-    "num_layers": 4,
-    "num_heads": 4,
-    "ffn_dim": 512,
-    "dropout": 0.1
   },
 
   "init_std": 0.02,
@@ -58,16 +39,11 @@
     "warmup_fraction": 0.01,
     "weight_decay": 0.05,
     "grad_clip": 1.0,
-    "weighted_loss": true,
-    "loss_decay": 0.9,
-    "scheduled_sampling_start_epoch": 10,
-    "scheduled_sampling_probability_increment": 0.01,
-    "scheduled_sampling_max_probability": 0.1,
     "log_interval": 50,
     "save_interval": 5,
     "val_fraction": 0.1,
     "phonemes_csv": "data/norbi/phonemes.csv",
-    "codec_dir": "data/norbi/codecs",
+    "latent_dir": "data/norbi/latents",
     "output_dir": "models"
   }
 }

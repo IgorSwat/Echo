@@ -15,10 +15,13 @@ def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, star
     cos,sin: (max_pos, hd//2)
     """
     T = x.size(2)
+    
     x_rot = x.float().reshape(*x.shape[:-1], -1, 2)              # (B, nh, T, hd//2, 2)
     c = cos[start_pos:start_pos + T].view(1, 1, T, -1)           # (1, 1, T, hd//2)
     s = sin[start_pos:start_pos + T].view(1, 1, T, -1)
+
     out = torch.empty_like(x_rot)
     out[..., 0] = x_rot[..., 0] * c - x_rot[..., 1] * s
     out[..., 1] = x_rot[..., 0] * s + x_rot[..., 1] * c
+
     return out.flatten(-2).to(x.dtype)
