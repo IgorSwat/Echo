@@ -53,5 +53,20 @@
     {"type": "upsample", "dim_in": 128, "mode": "nearest", "kernel_size": 3},
     {"type": "convnext", "dim_in": 64, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
     {"type": "convnext", "dim_in": 64, "dim_out": 24, "kernel_size": 7, "dropout": 0.1}
-  ]
+  ],
+
+  "training": {
+    "data_dir": "data/norbi",
+    "output_dir": "checkpoints",
+    "batch_size": 16,
+    "num_epochs": 100,
+    "learning_rate": 1e-4,
+    "weight_decay": 0.01,
+    "warmup_steps": 1000,
+    "grad_clip": 1.0,
+    "num_workers": 4,
+    "log_every": 20,
+    "save_every": 1000,
+    "seed": 42
+  }
 }

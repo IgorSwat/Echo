@@ -7,6 +7,22 @@ from typing import Any
 
 
 @dataclass
+class TrainingConfig:
+    data_dir: str
+    output_dir: str
+    batch_size: int
+    num_epochs: int
+    learning_rate: float
+    weight_decay: float
+    warmup_steps: int
+    grad_clip: float
+    num_workers: int
+    log_every: int
+    save_every: int
+    seed: int
+
+
+@dataclass
 class EchoConfig:
     # Constants
     latent_dim: int
@@ -32,6 +48,9 @@ class EchoConfig:
     # ("convnext" | "self_attention" | "cross_attention") plus block-specific params.
     blocks: list[dict[str, Any]]
 
+    # Training hyperparameters
+    training: TrainingConfig
+
     # Factory method
     @classmethod
     def from_json(cls, path: str | Path) -> EchoConfig:
@@ -55,6 +74,7 @@ class EchoConfig:
             text_encoder_use_rope=te["use_rope"],
             text_encoder_conv_use_norm=te["conv_use_norm"],
             blocks=list(d["blocks"]),
+            training=TrainingConfig(**d["training"]),
         )
 
 
