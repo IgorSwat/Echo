@@ -9,6 +9,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Echo(nn.Module):
@@ -110,22 +111,31 @@ class Echo(nn.Module):
         latent: torch.Tensor,                                       # (B, T, latent_dim)
         time: torch.Tensor,                                         # (B,)
         text_key_padding_mask: Optional[torch.Tensor] = None,       # (B, S) or None
+        latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
     ) -> torch.Tensor:
         # First encode both text & time
         cond = self.time_encoder(time)                                # (B, cond_dim)
         text_enc = self.text_encoder(text, text_key_padding_mask)    # (B, S, hidden)
 
         x = latent                                                     # (B, T, latent_dim)
+        mask = latent_key_padding_mask
 
         for block in self.blocks:
             if isinstance(block, CrossAttentionBlock):
-                x = block(x, text_enc, text_key_padding_mask, cond)   # (B, T, d_model)
+                x = block(x, text_enc, text_key_padding_mask, cond)   # (B, T', d')
             elif isinstance(block, SelfAttentionBlock):
-                x = block(x, None, cond)                               # (B, T, d_model)
+                x = block(x, mask, cond)                               # (B, T', d')
             elif isinstance(block, (Downsample1D, Upsample1D)):
-                x = block(x)                                            # (B, T', d')
+                x = block(x)                                            # (B, T'', d'')
+                if mask is not None:
+                    # Resize mask to match the new temporal dimension.
+                    mask = F.interpolate(
+                        mask.float().unsqueeze(1),                     # (B, 1, T')
+                        size=x.shape[1],
+                        mode="nearest",
+                    ).squeeze(1).bool()                                # (B, T'')
             else:                                                      # ConvNeXtBlock, etc.
-                x = block(x, cond)                                     # (B, T, d_model)
+                x = block(x, cond)                                     # (B, T', d')
 
         x = self.final_norm(x)                                        # (B, T, hidden)
         x = self.out_proj(x)                                          # (B, T, latent_dim)

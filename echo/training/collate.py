@@ -1,66 +1,60 @@
 from __future__ import annotations
 
-import random
+import torch
 
 from echo import config
 
-import torch
 
-# TODO: This is dubious and should be rewritten
+def collate_fn(
+    batch: list[tuple[torch.Tensor, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
+    """
+    Pads a batch of (text, audio_latent) pairs into uniform tensors and
+    builds boolean key-padding masks (True = valid, False = padding).
 
-# def collate_fn(
-#     batch: list[tuple[torch.Tensor, torch.Tensor]],
-#     dataset=None,
-#     reference_index: int | None = None,
-# ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-#     """
-#     Samples a shared ``(ref_text, ref_audio_latent)`` pair from ``dataset``
-#     (or uses ``reference_index`` when provided) and pads the per-item text
-#     and audio latent targets.
+    Text is padded with ``config.text_pad``; audio latents are zero-padded.
 
-#     Text is padded with ``TEXT_PAD_ID``; audio latents are padded with zeros.
+    Args:
+        batch: list of ``(text, audio_latent)`` tuples where
+            text        — ``(T_text,)``        long
+            audio_latent — ``(T_audio, C)``    float
 
-#     Returns:
-#         ref_text          — ``(1, T_ref_text)``
-#         ref_audio_latent  — ``(1, T_ref_audio, latent_dim)``
-#         text              — ``(B, T_text)``
-#         audio_latent      — ``(B, T_audio, latent_dim)``
-#         text_lengths      — ``(B,)`` true target-text lengths
-#         audio_lengths     — ``(B,)`` true target-audio lengths
-#     """
-#     texts, audios = zip(*batch)
-#     texts, audios = list(texts), list(audios)
+    Returns dict with:
+        text                  — ``(B, S)``         long
+        latent               — ``(B, T, C)``      float
+        text_key_padding_mask       — ``(B, S)``  bool  (True = valid)
+        latent_key_padding_mask     — ``(B, T)``  bool  (True = valid)
+    """
+    texts, audios = zip(*batch)
+    B = len(texts)
+    C = config.latent_dim
 
-#     B = len(texts)
-#     C = config.latent_dim
+    # --- Text ---
+    text_lengths = torch.tensor([t.size(0) for t in texts], dtype=torch.long)
+    S = int(text_lengths.max())
+    padded_texts = torch.full((B, S), config.text_pad, dtype=torch.long)
+    for i, t in enumerate(texts):
+        padded_texts[i, : t.size(0)] = t
 
-#     # Shared reference: drawn from the whole dataset, independent of the batch.
-#     if dataset is None:
-#         j = random.randrange(B)
-#         ref_text = texts[j].unsqueeze(0)
-#         ref_audio = audios[j].unsqueeze(0)
-#     else:
-#         index = reference_index if reference_index is not None else random.randrange(len(dataset))
-#         ref_text, ref_audio = dataset[index]
-#         ref_text = ref_text.unsqueeze(0)
-#         ref_audio = ref_audio.unsqueeze(0)
+    text_mask = torch.arange(S).unsqueeze(0) < text_lengths.unsqueeze(1)   # (B, S)
 
-#     # Broadcast the shared reference to the full batch dimension.
-#     ref_text = ref_text.expand(B, -1).contiguous()
-#     ref_audio = ref_audio.expand(B, -1, -1).contiguous()
+    # --- Audio latent ---
+    # Squeeze leading singleton dim if present (e.g. (1, T, C) -> (T, C)).
+    audios = [a.squeeze(0) if a.dim() == 3 and a.size(0) == 1 else a for a in audios]
+    audio_lengths = torch.tensor([a.size(0) for a in audios], dtype=torch.long)
+    T = int(audio_lengths.max())
+    # Round up to the nearest multiple of 8 so the U-Net's 3 stride-2 downsamples
+    # and exact-doubling upsamples perfectly reconstruct the temporal length.
+    T = ((T + 7) // 8) * 8
+    padded_audios = torch.zeros((B, T, C), dtype=torch.float32)
+    for i, a in enumerate(audios):
+        padded_audios[i, : a.size(0)] = a
 
-#     # Pad text targets.
-#     T_text = max(t.size(0) for t in texts)
-#     padded_texts = torch.full((B, T_text), config.text_pad_id, dtype=torch.long)
-#     for i, t in enumerate(texts):
-#         padded_texts[i, : t.size(0)] = t
+    audio_mask = torch.arange(T).unsqueeze(0) < audio_lengths.unsqueeze(1)  # (B, T)
 
-#     # Pad audio latent targets (zero-padded).
-#     T_audio = max(a.size(0) for a in audios)
-#     padded_audios = torch.zeros((B, T_audio, C), dtype=torch.float32)
-#     for i, a in enumerate(audios):
-#         padded_audios[i, : a.size(0)] = a
-
-#     text_lengths = torch.tensor([t.size(0) for t in texts], dtype=torch.long)
-#     audio_lengths = torch.tensor([a.size(0) for a in audios], dtype=torch.long)
-#     return ref_text, ref_audio, padded_texts, padded_audios, text_lengths, audio_lengths
+    return {
+        "text": padded_texts,
+        "latent": padded_audios,
+        "text_key_padding_mask": text_mask,
+        "latent_key_padding_mask": audio_mask,
+    }

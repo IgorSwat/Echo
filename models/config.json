@@ -5,6 +5,10 @@
     "text": 256
   },
 
+  "special_tokens": {
+    "text_pad": 0
+  },
+
   "text_embedding_dim": 512,
   "time_embedding_dim": 512,
 
@@ -48,6 +52,6 @@
     {"type": "convnext", "dim_in": 128, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
     {"type": "upsample", "dim_in": 128, "mode": "nearest", "kernel_size": 3},
     {"type": "convnext", "dim_in": 64, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
-    {"type": "convnext", "dim_in": 64, "dim_out": 64, "kernel_size": 7, "dropout": 0.1}
+    {"type": "convnext", "dim_in": 64, "dim_out": 24, "kernel_size": 7, "dropout": 0.1}
   ]
 }

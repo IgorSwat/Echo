@@ -15,6 +15,9 @@ class EchoConfig:
     time_embedding_dim: int
     init_std: float
 
+    # Special tokens
+    text_pad: int
+
     # Text encoder (Conformer) structural params
     text_encoder_num_layers: int
     text_encoder_num_heads: int
@@ -42,6 +45,7 @@ class EchoConfig:
             text_embedding_dim=d["text_embedding_dim"],
             time_embedding_dim=d["time_embedding_dim"],
             init_std=d["init_std"],
+            text_pad=d["special_tokens"]["text_pad"],
             text_encoder_num_layers=te["num_layers"],
             text_encoder_num_heads=te["num_heads"],
             text_encoder_ffn_dim=te["ffn_dim"],
