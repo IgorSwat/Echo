@@ -3,6 +3,7 @@ from echo import config
 from echo.modules.attention import BidirectionalSelfAttention
 from echo.modules.conv import GatedConv
 from echo.modules.ffn import FeedForward
+from echo.modules.norm import ConditionalLayerNorm
 
 from typing import Optional
 
@@ -25,26 +26,30 @@ class ConformerBlock(nn.Module):
         dropout: float = 0.0,
         use_rope: bool = False,
         conv_use_norm: bool = True,
+        use_ada_ln: bool = False,
+        cond_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
+        self.use_ada_ln = use_ada_ln
         self.ffn1 = FeedForward(d_model, ffn_dim, dropout, use_glu=config.decoder_ffn_glu)
-        self.norm_attn = nn.LayerNorm(d_model)
+        self.norm_attn = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.attn = BidirectionalSelfAttention(d_model, num_heads, dropout, use_rope=use_rope)
         self.conv = GatedConv(d_model, kernel_size, use_norm=conv_use_norm, dropout=dropout)
         self.ffn2 = FeedForward(d_model, ffn_dim, dropout, use_glu=config.decoder_ffn_glu)
-        self.norm_out = nn.LayerNorm(d_model)
+        self.norm_out = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
 
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, D)
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, T) or None
+        cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
     ) -> torch.Tensor:
         # Macaron half-step FFNs
         x = x + 0.5 * self.ffn1(x)                                   # (B, T, D)
-        x = x + self.attn(self.norm_attn(x), key_padding_mask)       # (B, T, D)
+        x = x + self.attn(self.norm_attn(x, cond), key_padding_mask)  # (B, T, D)
         x = x + self.conv(x)                                         # (B, T, D)
         x = x + 0.5 * self.ffn2(x)                                   # (B, T, D)
-        x = self.norm_out(x)                                         # (B, T, D)
+        x = self.norm_out(x, cond)                                   # (B, T, D)
 
         return x                                                     # (B, T, D)
 
@@ -64,27 +69,32 @@ class Conformer(nn.Module):
         dropout: float = 0.0,
         use_rope: bool = False,
         conv_use_norm: bool = True,
+        use_ada_ln: bool = False,
+        cond_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
+        self.use_ada_ln = use_ada_ln
 
         self.blocks = nn.ModuleList([
             ConformerBlock(
                 d_model, num_heads, ffn_dim, kernel_size,
                 dropout, use_rope, conv_use_norm,
+                use_ada_ln, cond_dim,
             )
             for _ in range(num_layers)
         ])
 
         # One final norm
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
 
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, D)
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, T) or None
+        cond: Optional[torch.Tensor] = None,                         # (B, cond_dim) or None
     ) -> torch.Tensor:
         for block in self.blocks:
-            x = block(x, key_padding_mask)                           # (B, T, D)
-        x = self.norm(x)                                             # (B, T, D)
+            x = block(x, key_padding_mask, cond)                     # (B, T, D)
+        x = self.norm(x, cond)                                       # (B, T, D)
 
         return x                                                     # (B, T, D)
