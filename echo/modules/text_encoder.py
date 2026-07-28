@@ -25,11 +25,12 @@ class TextEncoder(nn.Module):
         dropout: float = 0.0,
         use_rope: bool = False,
         conv_use_norm: bool = True,
+        ffn_glu: bool = False,
     ) -> None:
         super().__init__()
-        
+
         self.embed = nn.Embedding(vocab_size, d_model)
-        
+
         self.conformer = Conformer(
             d_model=d_model,
             num_layers=num_layers,
@@ -39,6 +40,7 @@ class TextEncoder(nn.Module):
             dropout=dropout,
             use_rope=use_rope,
             conv_use_norm=conv_use_norm,
+            ffn_glu=ffn_glu,
         )
 
 		# Additional linear projection in case the output dimension should be different.

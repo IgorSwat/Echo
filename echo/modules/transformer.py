@@ -1,5 +1,3 @@
-from echo import config
-
 from echo.modules.attention import BidirectionalSelfAttention, CrossAttention
 from echo.modules.ffn import FeedForward
 from echo.modules.norm import ConditionalLayerNorm
@@ -22,13 +20,14 @@ class SelfAttentionBlock(nn.Module):
         use_rope: bool = False,
         use_ada_ln: bool = False,
         cond_dim: Optional[int] = None,
+        ffn_glu: bool = False,
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
         self.norm1 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.attn = BidirectionalSelfAttention(d_model, num_heads, dropout, use_rope=use_rope)
         self.norm2 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
-        self.ffn = FeedForward(d_model, ffn_dim, dropout, config.decoder_ffn_glu)
+        self.ffn = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
 
     def forward(
         self,
@@ -43,10 +42,17 @@ class SelfAttentionBlock(nn.Module):
 
 
 class CrossAttentionBlock(nn.Module):
-    """Pre-norm transformer block with cross-attention over an external context."""
+    """Pre-norm transformer block with cross-attention over an external context.
+
+    Query and context streams may have different hidden dims (d_query / d_kv);
+    both are projected to d_model inside the CrossAttention. The residual path
+    for the query stream is projected to d_model when d_query != d_model.
+    """
 
     def __init__(
         self,
+        d_query: int,
+        d_kv: int,
         d_model: int,
         num_heads: int,
         ffn_dim: int,
@@ -54,25 +60,33 @@ class CrossAttentionBlock(nn.Module):
         use_rope: bool = False,
         use_ada_ln: bool = False,
         cond_dim: Optional[int] = None,
+        ffn_glu: bool = False,
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
+        self.needs_proj = d_query != d_model
 
-        # Two separate layer norms for queries and keys/values (context)
-        self.norm_q = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
-        self.norm_ctx = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
-        self.attn = CrossAttention(d_model, num_heads, dropout, use_rope=use_rope)
+        # Separate norms for the query and context streams (each at its own dim).
+        self.norm_q = ConditionalLayerNorm(d_query, cond_dim, use_ada_ln=use_ada_ln)
+        self.norm_ctx = ConditionalLayerNorm(d_kv, cond_dim, use_ada_ln=use_ada_ln)
+        self.attn = CrossAttention(d_query, d_kv, d_model, num_heads, dropout, use_rope=use_rope)
         self.norm2 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
-        self.ffn = FeedForward(d_model, ffn_dim, dropout, config.decoder_ffn_glu)
+        self.ffn = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
+
+        if self.needs_proj:
+            self.resid_proj = nn.Linear(d_query, d_model)
+        else:
+            self.resid_proj = None
 
     def forward(
         self,
-        x: torch.Tensor,                                            # (B, T, D)
-        context: torch.Tensor,                                      # (B, S, D)
+        x: torch.Tensor,                                            # (B, T, d_query)
+        context: torch.Tensor,                                      # (B, S, d_kv)
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm_q(x, cond), self.norm_ctx(context, cond), key_padding_mask)  # (B, T, D)
-        x = x + self.ffn(self.norm2(x, cond))                       # (B, T, D)
+        residual = self.resid_proj(x) if self.needs_proj else x        # (B, T, d_model)
+        x = residual + self.attn(self.norm_q(x, cond), self.norm_ctx(context, cond), key_padding_mask)  # (B, T, d_model)
+        x = x + self.ffn(self.norm2(x, cond))                       # (B, T, d_model)
 
-        return x                                                     # (B, T, D)
+        return x                                                     # (B, T, d_model)

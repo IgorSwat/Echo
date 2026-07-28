@@ -87,10 +87,14 @@ class BidirectionalSelfAttention(nn.Module):
 class CrossAttention(nn.Module):
     """
     Multi-head cross-attention with RoPE on the query stream.
+    Query and key/value streams may have different hidden dimensions:
+    q_proj projects d_query -> d_model, kv_proj projects d_kv -> d_model.
     """
 
     def __init__(
         self,
+        d_query: int,
+        d_kv: int,
         d_model: int,
         num_heads: int,
         dropout: float = 0.0,
@@ -106,8 +110,8 @@ class CrossAttention(nn.Module):
         self.use_rope = use_rope
         self.rope_theta = rope_theta
 
-        self.q = nn.Linear(d_model, d_model)
-        self.kv = nn.Linear(d_model, 2 * d_model)
+        self.q = nn.Linear(d_query, d_model)
+        self.kv = nn.Linear(d_kv, 2 * d_model)
         self.proj = nn.Linear(d_model, d_model)
 
         self.attn_drop_value = dropout
@@ -125,24 +129,26 @@ class CrossAttention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,                                            # (B, T, D)
-        context: torch.Tensor,                                      # (B, S, D)
+        x: torch.Tensor,                                            # (B, T, d_query)
+        context: torch.Tensor,                                      # (B, S, d_kv)
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
     ) -> torch.Tensor:
-        B, T, D = x.shape
+        B, T, _ = x.shape
         S = context.shape[1]
 
         q = self.q(x).view(B, T, self.nh, self.hd).transpose(1, 2)    # (B, nh, T, hd)
-        kv = self.kv(context)                                         # (B, S, 2D)
-        k, v = kv.split(D, dim=-1)                                    # each (B, S, D)
+        kv = self.kv(context)                                         # (B, S, 2*d_model)
+        k, v = kv.split(self.nh * self.hd, dim=-1)                    # each (B, S, d_model)
         k = k.view(B, S, self.nh, self.hd).transpose(1, 2)            # (B, nh, S, hd)
         v = v.view(B, S, self.nh, self.hd).transpose(1, 2)            # (B, nh, S, hd)
 
         # Optional RoPE on the query stream
         if self.use_rope:
-            cos, sin = rope_cos_sin(self.hd, T + 1, device=x.device, theta=self.rope_theta)
+            max_len = max(T, S) + 1
+            cos, sin = rope_cos_sin(self.hd, max_len, device=x.device, theta=self.rope_theta)
             q = apply_rotary_emb(q, cos, sin, 0)                     # (B, nh, T, hd)
-            k = apply_rotary_emb(k, cos, sin, 0)                     # (B, nh, S, hd)
+            # Do NOT apply RoPE for keys/values in cross-attention
+            # k = apply_rotary_emb(k, cos, sin, 0)                     # (B, nh, S, hd) 
 
         # Masking
         # The key_padding_mask masks the context (length S), not the query stream.
@@ -160,7 +166,8 @@ class CrossAttention(nn.Module):
 
         # The length of the cross-attention output follows the QUERY sequence,
         # since attention computes a single weighted average per query position.
-        out = out.transpose(1, 2).contiguous().view(B, T, D)         # (B, T, D)
-        out = self.resid_drop(self.proj(out))                        # (B, T, D)
+        D = self.nh * self.hd
+        out = out.transpose(1, 2).contiguous().view(B, T, D)         # (B, T, d_model)
+        out = self.resid_drop(self.proj(out))                        # (B, T, d_model)
 
-        return out                                                   # (B, T, D)
+        return out                                                   # (B, T, d_model)

@@ -1,5 +1,3 @@
-from echo import config
-
 from echo.modules.attention import BidirectionalSelfAttention
 from echo.modules.conv import GatedConv
 from echo.modules.ffn import FeedForward
@@ -28,14 +26,15 @@ class ConformerBlock(nn.Module):
         conv_use_norm: bool = True,
         use_ada_ln: bool = False,
         cond_dim: Optional[int] = None,
+        ffn_glu: bool = False,
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
-        self.ffn1 = FeedForward(d_model, ffn_dim, dropout, use_glu=config.decoder_ffn_glu)
+        self.ffn1 = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
         self.norm_attn = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.attn = BidirectionalSelfAttention(d_model, num_heads, dropout, use_rope=use_rope)
         self.conv = GatedConv(d_model, kernel_size, use_norm=conv_use_norm, dropout=dropout)
-        self.ffn2 = FeedForward(d_model, ffn_dim, dropout, use_glu=config.decoder_ffn_glu)
+        self.ffn2 = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
         self.norm_out = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
 
     def forward(
@@ -71,6 +70,7 @@ class Conformer(nn.Module):
         conv_use_norm: bool = True,
         use_ada_ln: bool = False,
         cond_dim: Optional[int] = None,
+        ffn_glu: bool = False,
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
@@ -79,7 +79,7 @@ class Conformer(nn.Module):
             ConformerBlock(
                 d_model, num_heads, ffn_dim, kernel_size,
                 dropout, use_rope, conv_use_norm,
-                use_ada_ln, cond_dim,
+                use_ada_ln, cond_dim, ffn_glu,
             )
             for _ in range(num_layers)
         ])
