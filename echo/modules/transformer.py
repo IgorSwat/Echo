@@ -84,9 +84,13 @@ class CrossAttentionBlock(nn.Module):
         context: torch.Tensor,                                      # (B, S, d_kv)
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
+        query_padding_mask: Optional[torch.Tensor] = None,          # (B, T) or None
     ) -> torch.Tensor:
         residual = self.resid_proj(x) if self.needs_proj else x        # (B, T, d_model)
-        x = residual + self.attn(self.norm_q(x, cond), self.norm_ctx(context, cond), key_padding_mask)  # (B, T, d_model)
+        x = residual + self.attn(
+            self.norm_q(x, cond), self.norm_ctx(context, cond),
+            key_padding_mask, query_padding_mask,
+        )                                                            # (B, T, d_model)
         x = x + self.ffn(self.norm2(x, cond))                       # (B, T, d_model)
 
         return x                                                     # (B, T, d_model)

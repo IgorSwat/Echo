@@ -62,6 +62,10 @@ class Echo(nn.Module):
         # The block flow defines its own dim progression starting from latent_dim.
         self.blocks, out_dim = self._build_blocks()
 
+        # Learned null-text condition for classifier-free guidance: replaces the
+        # text encoder output for samples whose conditioning is dropped.
+        self.null_text = nn.Parameter(torch.zeros(1, 1, config.text_embedding_dim))
+
         self.final_norm = nn.LayerNorm(out_dim)
         self.out_proj = nn.Linear(out_dim, config.latent_dim)
 
@@ -85,6 +89,10 @@ class Echo(nn.Module):
             if block_type in self.COND_TYPES:
                 spec.setdefault("use_ada_ln", True)
                 spec.setdefault("cond_dim", self.cond_dim)
+            # Override dim_in with the current dimension so the config
+            # only needs to specify dim_out for convnext blocks.
+            if "dim_in" in spec:
+                spec["dim_in"] = cur_dim
             blocks.append(cls(**spec))
             cur_dim = self._infer_out_dim(block_type, spec, cur_dim)
         return nn.ModuleList(blocks), cur_dim
@@ -112,17 +120,24 @@ class Echo(nn.Module):
         time: torch.Tensor,                                         # (B,)
         text_key_padding_mask: Optional[torch.Tensor] = None,       # (B, S) or None
         latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
+        text_drop_mask: Optional[torch.Tensor] = None,              # (B,) bool or None
     ) -> torch.Tensor:
         # First encode both text & time
         cond = self.time_encoder(time)                                # (B, cond_dim)
         text_enc = self.text_encoder(text, text_key_padding_mask)    # (B, S, hidden)
+
+        # Classifier-free guidance: swap in the learned null-text condition
+        # for samples whose text conditioning is dropped.
+        if text_drop_mask is not None and text_drop_mask.any():
+            null = self.null_text.expand_as(text_enc)                # (B, S, hidden)
+            text_enc = torch.where(text_drop_mask.view(-1, 1, 1), null, text_enc)
 
         x = latent                                                     # (B, T, latent_dim)
         mask = latent_key_padding_mask
 
         for block in self.blocks:
             if isinstance(block, CrossAttentionBlock):
-                x = block(x, text_enc, text_key_padding_mask, cond)   # (B, T', d')
+                x = block(x, text_enc, text_key_padding_mask, cond, mask)  # (B, T', d')
             elif isinstance(block, SelfAttentionBlock):
                 x = block(x, mask, cond)                               # (B, T', d')
             elif isinstance(block, (Downsample1D, Upsample1D)):

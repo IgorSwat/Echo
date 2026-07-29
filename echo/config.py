@@ -12,6 +12,7 @@ class TrainingConfig:
     output_dir: str
     batch_size: int
     num_epochs: int
+    val_ratio: float
     learning_rate: float
     weight_decay: float
     warmup_steps: int
@@ -20,6 +21,7 @@ class TrainingConfig:
     log_every: int
     save_every: int
     seed: int
+    text_dropout: float
 
 
 @dataclass

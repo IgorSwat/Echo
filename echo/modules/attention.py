@@ -86,9 +86,21 @@ class BidirectionalSelfAttention(nn.Module):
 
 class CrossAttention(nn.Module):
     """
-    Multi-head cross-attention with RoPE on the query stream.
-    Query and key/value streams may have different hidden dimensions:
-    q_proj projects d_query -> d_model, kv_proj projects d_kv -> d_model.
+    Multi-head cross-attention with rotary position embeddings on BOTH the
+    query and key streams (Supertonic-style).
+
+    Positions of each stream are normalized by their valid (mask) lengths, so
+    both live in [0, 1]: a frame 30% through the audio shares a coordinate
+    with a token 30% through the text. Since both streams are rotated, the
+    attention score depends on content AND the relative normalized position
+    theta * (p_q - p_k): matches at equal relative position are preserved
+    exactly, off-diagonal matches are scrambled by the rotation. This gives a
+    soft, learnable diagonal alignment prior by construction.
+
+    The rotary frequencies ``theta`` are learnable and zero-initialized, so
+    training starts as pure content-based attention and the positional prior
+    grows only as needed. Rotation uses split-half pairing: head dim i is
+    paired with dim i + hd//2.
     """
 
     def __init__(
@@ -99,7 +111,6 @@ class CrossAttention(nn.Module):
         num_heads: int,
         dropout: float = 0.0,
         use_rope: bool = False,
-        rope_theta: float = 10000.0,
     ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
@@ -108,7 +119,6 @@ class CrossAttention(nn.Module):
         self.nh = num_heads
         self.hd = d_model // num_heads
         self.use_rope = use_rope
-        self.rope_theta = rope_theta
 
         self.q = nn.Linear(d_query, d_model)
         self.kv = nn.Linear(d_kv, 2 * d_model)
@@ -116,6 +126,12 @@ class CrossAttention(nn.Module):
 
         self.attn_drop_value = dropout
         self.resid_drop = nn.Dropout(dropout)
+
+        # Learnable rotary frequencies (one per head-dim pair). Zero-init =>
+        # identity rotation at the start of training.
+        if use_rope:
+            self.rotary_dim = self.hd // 2
+            self.theta = nn.Parameter(torch.zeros(self.rotary_dim))
 
         self._init_weights()
 
@@ -127,11 +143,41 @@ class CrossAttention(nn.Module):
         nn.init.normal_(self.proj.weight, mean=0.0, std=config.init_std)
         nn.init.zeros_(self.proj.bias)
 
+    def _rotary_angles(
+        self,
+        batch_size: int,
+        seq_len: int,
+        key_padding_mask: Optional[torch.Tensor],               # (B, T) or None
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalized positions ([0, 1] over the valid region) times theta."""
+        pos = torch.arange(seq_len, device=device, dtype=torch.float32).view(1, seq_len, 1)
+        if key_padding_mask is not None:
+            lengths = key_padding_mask.sum(dim=1).clamp_min(1).view(-1, 1, 1).float()
+        else:
+            lengths = torch.full((batch_size, 1, 1), float(seq_len), device=device)
+        ang = (pos / lengths) * self.theta.view(1, 1, -1)         # (B, T, rotary_dim)
+        return ang.sin(), ang.cos()
+
+    @staticmethod
+    def _apply_rotary(x: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor) -> torch.Tensor:
+        # x: (B, nh, T, hd); sin/cos: (B, T, rotary_dim)
+        rd = sin.shape[-1]
+        s = sin.unsqueeze(1)                                      # (B, 1, T, rd)
+        c = cos.unsqueeze(1)                                      # (B, 1, T, rd)
+        x1, x2 = x[..., :rd], x[..., rd : 2 * rd]                 # paired halves
+        rot = torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
+        tail = x[..., 2 * rd :]                                   # untouched dims (odd hd)
+        if tail.shape[-1] > 0:
+            rot = torch.cat([rot, tail], dim=-1)
+        return rot
+
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, d_query)
         context: torch.Tensor,                                      # (B, S, d_kv)
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
+        query_padding_mask: Optional[torch.Tensor] = None,          # (B, T) or None
     ) -> torch.Tensor:
         B, T, _ = x.shape
         S = context.shape[1]
@@ -142,13 +188,12 @@ class CrossAttention(nn.Module):
         k = k.view(B, S, self.nh, self.hd).transpose(1, 2)            # (B, nh, S, hd)
         v = v.view(B, S, self.nh, self.hd).transpose(1, 2)            # (B, nh, S, hd)
 
-        # Optional RoPE on the query stream
+        # Dual-stream rotary at length-normalized positions.
         if self.use_rope:
-            max_len = max(T, S) + 1
-            cos, sin = rope_cos_sin(self.hd, max_len, device=x.device, theta=self.rope_theta)
-            q = apply_rotary_emb(q, cos, sin, 0)                     # (B, nh, T, hd)
-            # Do NOT apply RoPE for keys/values in cross-attention
-            # k = apply_rotary_emb(k, cos, sin, 0)                     # (B, nh, S, hd) 
+            sin_q, cos_q = self._rotary_angles(B, T, query_padding_mask, x.device)
+            sin_k, cos_k = self._rotary_angles(B, S, key_padding_mask, x.device)
+            q = self._apply_rotary(q, sin_q, cos_q)                  # (B, nh, T, hd)
+            k = self._apply_rotary(k, sin_k, cos_k)                  # (B, nh, S, hd)
 
         # Masking
         # The key_padding_mask masks the context (length S), not the query stream.
