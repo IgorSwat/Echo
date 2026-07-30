@@ -45,10 +45,11 @@ class ConformerBlock(nn.Module):
     ) -> torch.Tensor:
         # Macaron half-step FFNs
         x = x + 0.5 * self.ffn1(x)                                   # (B, T, D)
-        x = x + self.attn(self.norm_attn(x, cond), key_padding_mask)  # (B, T, D)
+        h, g = self.norm_attn(x, cond)                               # (B, T, D), (B, D)
+        x = x + g[:, None, :] * self.attn(h, key_padding_mask)       # (B, T, D)
         x = x + self.conv(x)                                         # (B, T, D)
         x = x + 0.5 * self.ffn2(x)                                   # (B, T, D)
-        x = self.norm_out(x, cond)                                   # (B, T, D)
+        x, _ = self.norm_out(x, cond)                                # (B, T, D)
 
         return x                                                     # (B, T, D)
 
@@ -95,6 +96,6 @@ class Conformer(nn.Module):
     ) -> torch.Tensor:
         for block in self.blocks:
             x = block(x, key_padding_mask, cond)                     # (B, T, D)
-        x = self.norm(x, cond)                                       # (B, T, D)
+        x, _ = self.norm(x, cond)                                    # (B, T, D)
 
         return x                                                     # (B, T, D)

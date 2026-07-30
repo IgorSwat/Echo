@@ -139,14 +139,84 @@ class ConvNeXtBlock(nn.Module):
         y = self.dw(x.transpose(1, 2)).transpose(1, 2)                # (B, T, dim_in)
         if self.pw_proj is not None:
             y = self.pw_proj(y)                                        # (B, T, dim_out)
-        y = self.norm(y, cond)                                        # (B, T, dim_out)
+        y, gate = self.norm(y, cond)                                  # (B, T, dim_out), (B, dim_out)
         y = self.pw2(self.act(self.pw1(y)))                           # (B, T, dim_out)
         y = y * self.gamma                                            # (B, T, dim_out) layer scale
         y = self.drop(y)                                              # (B, T, dim_out)
+        y = gate[:, None, :] * y                                      # (B, T, dim_out) AdaLN-Zero gate
 
         residual = self.resid_proj(x) if self.needs_proj else x       # (B, T, dim_out)
 
         return y + residual                                           # (B, T, dim_out)
+
+
+class SkipConnection1D(nn.Module):
+    """
+    U-Net skip fuse: combine the current (decoder) stream `x` with a stashed
+    encoder feature `skip` at the same temporal resolution.
+
+    Modes:
+      - "add":    project skip -> dim_x (if needed) and add
+      - "concat": concat on channel dim, then linear back to dim_x
+
+    Time lengths are aligned by center-cropping to the shorter side (handles
+    off-by-one from stride-2 down/up).
+    """
+
+    def __init__(
+        self,
+        dim_x: int,
+        dim_skip: int,
+        mode: str = "add",
+    ) -> None:
+        super().__init__()
+        if mode not in ("add", "concat"):
+            raise ValueError(f"skip mode must be 'add' or 'concat', got {mode!r}")
+        self.mode = mode
+        self.dim_x = dim_x
+        self.dim_skip = dim_skip
+
+        if mode == "add":
+            self.proj = (
+                nn.Identity()
+                if dim_skip == dim_x
+                else nn.Linear(dim_skip, dim_x)
+            )
+        else:
+            self.proj = nn.Linear(dim_x + dim_skip, dim_x)
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        if isinstance(self.proj, nn.Linear):
+            # Zero-init so the skip path starts closed (decoder-only residual).
+            nn.init.zeros_(self.proj.weight)
+            nn.init.zeros_(self.proj.bias)
+
+    @staticmethod
+    def _align_time(x: torch.Tensor, skip: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        t_x, t_s = x.shape[1], skip.shape[1]
+        if t_x == t_s:
+            return x, skip
+        t = min(t_x, t_s)
+        # Center-crop the longer sequence.
+        if t_x > t:
+            start = (t_x - t) // 2
+            x = x[:, start:start + t]
+        if t_s > t:
+            start = (t_s - t) // 2
+            skip = skip[:, start:start + t]
+        return x, skip
+
+    def forward(
+        self,
+        x: torch.Tensor,                                              # (B, T, dim_x)
+        skip: torch.Tensor,                                           # (B, T', dim_skip)
+    ) -> torch.Tensor:
+        x, skip = self._align_time(x, skip)                           # (B, T, ·)
+        if self.mode == "add":
+            return x + self.proj(skip)                                # (B, T, dim_x)
+        return self.proj(torch.cat([x, skip], dim=-1))                # (B, T, dim_x)
 
 
 class Downsample1D(nn.Module):

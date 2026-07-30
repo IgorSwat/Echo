@@ -35,8 +35,10 @@ class SelfAttentionBlock(nn.Module):
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, T) or None
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x, cond), key_padding_mask)    # (B, T, D)
-        x = x + self.ffn(self.norm2(x, cond))                       # (B, T, D)
+        h, g1 = self.norm1(x, cond)                                 # (B, T, D), (B, D)
+        x = x + g1[:, None, :] * self.attn(h, key_padding_mask)    # (B, T, D)
+        h, g2 = self.norm2(x, cond)                                 # (B, T, D), (B, D)
+        x = x + g2[:, None, :] * self.ffn(h)                        # (B, T, D)
 
         return x                                                     # (B, T, D)
 
@@ -87,10 +89,13 @@ class CrossAttentionBlock(nn.Module):
         query_padding_mask: Optional[torch.Tensor] = None,          # (B, T) or None
     ) -> torch.Tensor:
         residual = self.resid_proj(x) if self.needs_proj else x        # (B, T, d_model)
-        x = residual + self.attn(
-            self.norm_q(x, cond), self.norm_ctx(context, cond),
-            key_padding_mask, query_padding_mask,
-        )                                                            # (B, T, d_model)
-        x = x + self.ffn(self.norm2(x, cond))                       # (B, T, d_model)
+        q, g1 = self.norm_q(x, cond)                                 # (B, T, d_query), (B, d_query)
+        ctx, _ = self.norm_ctx(context, cond)                        # (B, S, d_kv)
+        delta = self.attn(q, ctx, key_padding_mask, query_padding_mask)
+        if not self.needs_proj:
+            delta = g1[:, None, :] * delta
+        x = residual + delta                                         # (B, T, d_model)
+        h, g2 = self.norm2(x, cond)                                  # (B, T, d_model), (B, d_model)
+        x = x + g2[:, None, :] * self.ffn(h)                         # (B, T, d_model)
 
         return x                                                     # (B, T, d_model)
