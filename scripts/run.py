@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Generate audio with a trained Echo flow-matching model.
 
-Starts from Gaussian noise and integrates the learned velocity field with
-``--steps`` Euler steps, conditioning the model on midpoint times
-``t_i = (i + 0.5) / steps`` (better quality than left-endpoint evaluation).
+The model is trained with conditional flow matching
+(``x_t = (1 - t) * noise + t * data``, velocity target ``data - noise``), so
+sampling starts from Gaussian noise at ``t = 0`` and solves the ODE
+``dx/dt = v(x, t)`` up to ``t = 1`` with a proper numerical integrator
+(``--solver euler`` or the second-order ``--solver midpoint``/RK2).
 The resulting audio latent is decoded to a waveform with BlueCodec.
 
 Usage:
@@ -51,6 +53,26 @@ def _select_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _velocity(
+    model: Echo,
+    text_ids: torch.Tensor,
+    x: torch.Tensor,
+    t: torch.Tensor,
+    cfg_scale: float,
+) -> torch.Tensor:
+    """One velocity evaluation at (x, t), with classifier-free guidance.
+
+    With ``cfg_scale != 1`` the model runs batch-doubled (conditioned +
+    null-text) and extrapolates: v = v_uncond + cfg * (v_cond - v_uncond).
+    """
+    if cfg_scale == 1.0:
+        return model(text_ids, x, t)
+    drop = torch.tensor([False, True], device=x.device)
+    v2 = model(text_ids.repeat(2, 1), x.repeat(2, 1, 1), t.repeat(2),
+               None, None, drop)
+    return v2[1:2] + cfg_scale * (v2[0:1] - v2[1:2])
+
+
 @torch.no_grad()
 def _generate(
     model: Echo,
@@ -58,24 +80,27 @@ def _generate(
     num_frames: int,
     steps: int,
     cfg_scale: float,
+    solver: str,
 ) -> torch.Tensor:
     """Integrate the velocity field from t=0 (noise) to t=1 (data).
 
-    With ``cfg_scale != 1`` each step runs the model batch-doubled (conditioned
-    + null-text) and extrapolates: v = v_uncond + cfg * (v_cond - v_uncond).
+    ``euler``    -- x <- x + v(x, t_i) * dt with t_i = i / steps; the canonical
+                    flow-matching sampler (1 model evaluation per step).
+    ``midpoint`` -- explicit midpoint (RK2): predict the state at t_i + dt/2
+                    with an Euler half-step, then advance using the velocity
+                    evaluated there (2 model evaluations per step).
     """
     dt = 1.0 / steps
     x = torch.randn(1, num_frames, config.latent_dim, device=text_ids.device)
     for i in range(steps):
-        t = torch.full((1,), (i + 0.5) / steps, device=text_ids.device)   # midpoint time
-        if cfg_scale == 1.0:
-            v = model(text_ids, x, t)
-        else:
-            drop = torch.tensor([False, True], device=text_ids.device)
-            v2 = model(text_ids.repeat(2, 1), x.repeat(2, 1, 1), t.repeat(2),
-                       None, None, drop)
-            v = v2[1:2] + cfg_scale * (v2[0:1] - v2[1:2])
-        x = x + dt * v
+        t0 = torch.full((1,), i / steps, device=text_ids.device)
+        if solver == "euler":
+            x = x + dt * _velocity(model, text_ids, x, t0, cfg_scale)
+        else:                                                             # midpoint (RK2)
+            v1 = _velocity(model, text_ids, x, t0, cfg_scale)
+            x_mid = x + 0.5 * dt * v1
+            t_mid = torch.full((1,), (i + 0.5) / steps, device=text_ids.device)
+            x = x + dt * _velocity(model, text_ids, x_mid, t_mid, cfg_scale)
     return x                                                              # (1, T, C)
 
 
@@ -95,6 +120,9 @@ def main() -> None:
     parser.add_argument("--text", type=str, required=True, help="Phoneme string to synthesize.")
     parser.add_argument("--duration", type=float, required=True, help="Audio duration in seconds.")
     parser.add_argument("--steps", type=int, default=8, help="Flow-matching integration steps (default: 8).")
+    parser.add_argument("--solver", choices=("euler", "midpoint"), default="euler",
+                        help="ODE integrator: 'euler' (1 model eval/step, default) or "
+                             "'midpoint' (RK2, 2 evals/step, better at few steps).")
     parser.add_argument("--cfg", type=float, default=3.0,
                         help="Classifier-free guidance scale (default: 3.0; 1.0 disables guidance).")
     parser.add_argument(
@@ -113,6 +141,7 @@ def main() -> None:
     print_info("Device", str(device), Colors.OKCYAN)
     print_info("Checkpoint", args.model)
     print_info("Steps", str(args.steps))
+    print_info("Solver", args.solver)
     print_info("CFG scale", str(args.cfg))
     print_info("Duration", f"{args.duration:.2f}s")
 
@@ -138,7 +167,7 @@ def main() -> None:
     num_frames = math.ceil(args.duration * _SAMPLE_RATE / _HOP)
     print_info("Latent frames", str(num_frames))
 
-    latent = _generate(model, text_ids, num_frames, args.steps, args.cfg)   # (1, T, C)
+    latent = _generate(model, text_ids, num_frames, args.steps, args.cfg, args.solver)  # (1, T, C)
 
     # --- Denormalize ----------------------------------------------------------
     # The model operates in channel-normalized latent space; BlueCodec expects

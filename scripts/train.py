@@ -152,8 +152,12 @@ def main() -> None:
     t_start = time.perf_counter()
 
     for epoch in range(cfg.num_epochs):
+        epoch_train_loss = 0.0
+        epoch_train_batches = 0
         for batch in train_loader:
             loss = _flow_matching_loss(model, batch, device, cfg.text_dropout)
+            epoch_train_loss += loss.item()
+            epoch_train_batches += 1
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -180,6 +184,7 @@ def main() -> None:
         # --- Validation -------------------------------------------------------
         if len(val_set) > 0:
             model.eval()
+            train_loss_avg = epoch_train_loss / epoch_train_batches
             val_loss = 0.0
             with torch.no_grad():
                 for batch in val_loader:
@@ -187,7 +192,7 @@ def main() -> None:
             val_loss /= len(val_loader)
             model.train()
             print_info(f"epoch {epoch + 1}/{cfg.num_epochs} val",
-                       f"loss {val_loss:.4f}", Colors.WARNING)
+                       f"loss {val_loss:.4f} (train: {train_loss_avg:.4f})", Colors.WARNING)
 
     # --- Final save -----------------------------------------------------------
     ckpt = output_dir / "echo_final.pt"
