@@ -1,5 +1,4 @@
 from echo import config
-from echo.modules.rope import rope_cos_sin, apply_rotary_emb
 
 from typing import Optional
 
@@ -44,6 +43,28 @@ class BidirectionalSelfAttention(nn.Module):
         nn.init.normal_(self.proj.weight, mean=0.0, std=config.init_std)
         nn.init.zeros_(self.proj.bias)
 
+    def _rope_freqs(self, max_pos: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        theta = self.rope_theta
+        freqs = 1.0 / (theta ** (torch.arange(0, self.hd, 2, device=device, dtype=torch.float32) / self.hd))
+        t = torch.arange(max_pos, device=device, dtype=torch.float32)
+        freqs = torch.outer(t, freqs)
+        return freqs.cos(), freqs.sin()
+
+    @staticmethod
+    def _apply_rotary_emb(
+        x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, start_pos: int = 0
+    ) -> torch.Tensor:
+        T = x.size(2)
+        
+        x_rot = x.float().reshape(*x.shape[:-1], -1, 2)
+        c = cos[start_pos:start_pos + T].view(1, 1, T, -1)
+        s = sin[start_pos:start_pos + T].view(1, 1, T, -1)
+        out = torch.empty_like(x_rot)
+        out[..., 0] = x_rot[..., 0] * c - x_rot[..., 1] * s
+        out[..., 1] = x_rot[..., 0] * s + x_rot[..., 1] * c
+        
+        return out.flatten(-2).to(x.dtype)
+
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, D)
@@ -59,9 +80,9 @@ class BidirectionalSelfAttention(nn.Module):
 
         # Optional RoPE
         if self.use_rope:
-            cos, sin = rope_cos_sin(self.hd, T + 1, device=x.device, theta=self.rope_theta)
-            q = apply_rotary_emb(q, cos, sin, 0)                     # (B, nh, T, hd)
-            k = apply_rotary_emb(k, cos, sin, 0)                     # (B, nh, T, hd)
+            cos, sin = self._rope_freqs(T + 1, device=x.device)
+            q = self._apply_rotary_emb(q, cos, sin)
+            k = self._apply_rotary_emb(k, cos, sin)
 
         # Masking
         # This serves a very concrete purpose: during training, some of the input entries
@@ -87,20 +108,7 @@ class BidirectionalSelfAttention(nn.Module):
 class CrossAttention(nn.Module):
     """
     Multi-head cross-attention with rotary position embeddings on BOTH the
-    query and key streams (Supertonic-style).
-
-    Positions of each stream are normalized by their valid (mask) lengths, so
-    both live in [0, 1]: a frame 30% through the audio shares a coordinate
-    with a token 30% through the text. Since both streams are rotated, the
-    attention score depends on content AND the relative normalized position
-    theta * (p_q - p_k): matches at equal relative position are preserved
-    exactly, off-diagonal matches are scrambled by the rotation. This gives a
-    soft, learnable diagonal alignment prior by construction.
-
-    The rotary frequencies ``theta`` are learnable and zero-initialized, so
-    training starts as pure content-based attention and the positional prior
-    grows only as needed. Rotation uses split-half pairing: head dim i is
-    paired with dim i + hd//2.
+    query and key streams.
     """
 
     def __init__(
@@ -143,14 +151,25 @@ class CrossAttention(nn.Module):
         nn.init.normal_(self.proj.weight, mean=0.0, std=config.init_std)
         nn.init.zeros_(self.proj.bias)
 
-    def _rotary_angles(
+    def _rope_freqs(
         self,
         batch_size: int,
         seq_len: int,
         key_padding_mask: Optional[torch.Tensor],               # (B, T) or None
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalized positions ([0, 1] over the valid region) times theta."""
+        """
+        Normalized positions ([0, 1] over the valid region) times learnable theta.
+
+        Unlike the standard RoPE in BidirectionalSelfAttention:
+        - theta is *learnable* (zero-initialized), not a fixed hyperparameter.
+        - positions are *normalized* to [0, 1] based on each sequence's actual
+          (non-padded) length, so variable-length contexts are handled robustly.
+        - dual-stream: Q and K receive position encodings from their own sequences,
+          enabling the model to reason about relative distances between two
+          different timelines.
+        """
+
         pos = torch.arange(seq_len, device=device, dtype=torch.float32).view(1, seq_len, 1)
         if key_padding_mask is not None:
             lengths = key_padding_mask.sum(dim=1).clamp_min(1).view(-1, 1, 1).float()
@@ -160,7 +179,15 @@ class CrossAttention(nn.Module):
         return ang.sin(), ang.cos()
 
     @staticmethod
-    def _apply_rotary(x: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor) -> torch.Tensor:
+    def _apply_rotary_emb(x: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor) -> torch.Tensor:
+        """
+        Apply rotary embeddings using split-half formulation.
+
+        Mathematically equivalent to the adjacent-pairs formulation in
+        BidirectionalSelfAttention, but operates on the first/second halves
+        of the head dimension.
+        """
+
         # x: (B, nh, T, hd); sin/cos: (B, T, rotary_dim)
         rd = sin.shape[-1]
         s = sin.unsqueeze(1)                                      # (B, 1, T, rd)
@@ -170,6 +197,7 @@ class CrossAttention(nn.Module):
         tail = x[..., 2 * rd :]                                   # untouched dims (odd hd)
         if tail.shape[-1] > 0:
             rot = torch.cat([rot, tail], dim=-1)
+
         return rot
 
     def forward(
@@ -190,10 +218,10 @@ class CrossAttention(nn.Module):
 
         # Dual-stream rotary at length-normalized positions.
         if self.use_rope:
-            sin_q, cos_q = self._rotary_angles(B, T, query_padding_mask, x.device)
-            sin_k, cos_k = self._rotary_angles(B, S, key_padding_mask, x.device)
-            q = self._apply_rotary(q, sin_q, cos_q)                  # (B, nh, T, hd)
-            k = self._apply_rotary(k, sin_k, cos_k)                  # (B, nh, S, hd)
+            sin_q, cos_q = self._rope_freqs(B, T, query_padding_mask, x.device)
+            sin_k, cos_k = self._rope_freqs(B, S, key_padding_mask, x.device)
+            q = self._apply_rotary_emb(q, sin_q, cos_q)                  # (B, nh, T, hd)
+            k = self._apply_rotary_emb(k, sin_k, cos_k)                  # (B, nh, S, hd)
 
         # Masking
         # The key_padding_mask masks the context (length S), not the query stream.
