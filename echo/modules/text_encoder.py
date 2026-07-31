@@ -26,6 +26,7 @@ class TextEncoder(nn.Module):
         use_rope: bool = False,
         conv_use_norm: bool = True,
         ffn_glu: bool = False,
+        max_seq_len: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -41,6 +42,7 @@ class TextEncoder(nn.Module):
             use_rope=use_rope,
             conv_use_norm=conv_use_norm,
             ffn_glu=ffn_glu,
+            max_seq_len=max_seq_len,
         )
 
 		# Additional linear projection in case the output dimension should be different.

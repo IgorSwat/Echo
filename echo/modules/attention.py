@@ -7,9 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class BidirectionalSelfAttention(nn.Module):
+class SelfAttention(nn.Module):
     """
-    Multi-head bidirectional self-attention with RoPE.
+    Multi-head self-attention with RoPE.
     """
 
     def __init__(
@@ -19,21 +19,32 @@ class BidirectionalSelfAttention(nn.Module):
         dropout: float = 0.0,
         use_rope: bool = False,
         rope_theta: float = 10000.0,
+        mode: str = "bidirectional",
+        max_seq_len: Optional[int] = None,
     ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
             raise ValueError(f"d_model ({d_model}) must be divisible by num_heads ({num_heads})")
+        if mode not in ("bidirectional", "causal"):
+            raise ValueError(f"unknown mode: {mode!r}")
 
         self.nh = num_heads
         self.hd = d_model // num_heads
         self.use_rope = use_rope
         self.rope_theta = rope_theta
+        self.mode = mode
+        self.max_seq_len = max_seq_len
 
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.proj = nn.Linear(d_model, d_model)
 
         self.attn_drop_value = dropout
         self.resid_drop = nn.Dropout(dropout)
+
+        if use_rope and max_seq_len is not None:
+            cos, sin = self._rope_freqs(max_seq_len, device=torch.device("cpu"))
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
 
         self._init_weights()
 
@@ -80,7 +91,14 @@ class BidirectionalSelfAttention(nn.Module):
 
         # Optional RoPE
         if self.use_rope:
-            cos, sin = self._rope_freqs(T + 1, device=x.device)
+            if self.max_seq_len is not None:
+                if T > self.max_seq_len:
+                    raise ValueError(
+                        f"sequence length ({T}) exceeds max_seq_len ({self.max_seq_len})"
+                    )
+                cos, sin = self.rope_cos, self.rope_sin
+            else:
+                cos, sin = self._rope_freqs(T + 1, device=x.device)
             q = self._apply_rotary_emb(q, cos, sin)
             k = self._apply_rotary_emb(k, cos, sin)
 
@@ -92,6 +110,16 @@ class BidirectionalSelfAttention(nn.Module):
             if key_padding_mask.shape != (B, T):
                 raise ValueError(f"expected key_padding_mask shape {(B, T)}, got {tuple(key_padding_mask.shape)}")
             attn_mask = key_padding_mask.view(B, 1, 1, T)            # (B, 1, 1, T)
+
+        # Causal masking: prevent attending to future positions.
+        if self.mode == "causal":
+            causal_mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+            if attn_mask is not None:
+                # Combine key_padding_mask with the causal mask.
+                # (B, 1, 1, T) & (1, 1, T, T) -> broadcast to (B, 1, T, T)
+                attn_mask = attn_mask & causal_mask.unsqueeze(0).unsqueeze(0)
+            else:
+                attn_mask = causal_mask.view(1, 1, T, T)
 
         out = F.scaled_dot_product_attention(
             q, k, v,
@@ -161,7 +189,7 @@ class CrossAttention(nn.Module):
         """
         Normalized positions ([0, 1] over the valid region) times learnable theta.
 
-        Unlike the standard RoPE in BidirectionalSelfAttention:
+        Unlike the standard RoPE in SelfAttention:
         - theta is *learnable* (zero-initialized), not a fixed hyperparameter.
         - positions are *normalized* to [0, 1] based on each sequence's actual
           (non-padded) length, so variable-length contexts are handled robustly.
@@ -184,7 +212,7 @@ class CrossAttention(nn.Module):
         Apply rotary embeddings using split-half formulation.
 
         Mathematically equivalent to the adjacent-pairs formulation in
-        BidirectionalSelfAttention, but operates on the first/second halves
+        SelfAttention, but operates on the first/second halves
         of the head dimension.
         """
 

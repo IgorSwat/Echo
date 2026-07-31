@@ -1,4 +1,4 @@
-from echo.modules.attention import BidirectionalSelfAttention, CrossAttention
+from echo.modules.attention import SelfAttention, CrossAttention
 from echo.modules.ffn import FeedForward
 from echo.modules.norm import ConditionalLayerNorm
 
@@ -25,7 +25,7 @@ class SelfAttentionBlock(nn.Module):
         super().__init__()
         self.use_ada_ln = use_ada_ln
         self.norm1 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
-        self.attn = BidirectionalSelfAttention(d_model, num_heads, dropout, use_rope=use_rope)
+        self.attn = SelfAttention(d_model, num_heads, dropout, use_rope=use_rope)
         self.norm2 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.ffn = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
 

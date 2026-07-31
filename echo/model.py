@@ -61,6 +61,7 @@ class Echo(nn.Module):
             dropout=config.text_encoder_dropout,
             use_rope=config.text_encoder_use_rope,
             conv_use_norm=config.text_encoder_conv_use_norm,
+            max_seq_len=config.text_len_limit,
         )
 
         # --- Main processing stack (built from config["blocks"]) ---

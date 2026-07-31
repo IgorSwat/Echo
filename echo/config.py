@@ -34,6 +34,9 @@ class EchoConfig:
     time_embedding_dim: int
     init_std: float
 
+    # Limits
+    text_len_limit: int
+
     # Special tokens
     text_pad: int
 
@@ -67,6 +70,7 @@ class EchoConfig:
             text_embedding_dim=d["text_embedding_dim"],
             time_embedding_dim=d["time_embedding_dim"],
             init_std=d["init_std"],
+            text_len_limit=d["limits"]["text_len"],
             text_pad=d["special_tokens"]["text_pad"],
             text_encoder_num_layers=te["num_layers"],
             text_encoder_num_heads=te["num_heads"],
