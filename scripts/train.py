@@ -162,6 +162,8 @@ def main() -> None:
     model.train()
     step = 0
     t_start = time.perf_counter()
+    best_val_loss = float("inf")
+    epochs_no_improve = 0
 
     for epoch in range(cfg.num_epochs):
         epoch_train_loss = 0.0
@@ -190,12 +192,6 @@ def main() -> None:
                 log_file.write(f"{step},{epoch + 1},{loss.item():.6f},,{lr:.6e}\n")
                 log_file.flush()
 
-            if step % cfg.save_every == 0:
-                ckpt = output_dir / f"echo_step{step}.pt"
-                torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                            "step": step}, ckpt)
-                print_info("Checkpoint", str(ckpt), Colors.OKCYAN)
-
         # --- Validation -------------------------------------------------------
         if len(val_set) > 0:
             model.eval()
@@ -212,11 +208,33 @@ def main() -> None:
             log_file.write(f"{step},{epoch + 1},{train_loss_avg:.6f},{val_loss:.6f},{lr:.6e}\n")
             log_file.flush()
 
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                epochs_no_improve = 0
+                ckpt = output_dir / "echo_best.pt"
+                torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                            "step": step, "epoch": epoch + 1, "val_loss": val_loss}, ckpt)
+                print_info("Best checkpoint", str(ckpt), Colors.OKCYAN)
+            else:
+                epochs_no_improve += 1
+
+            if (epoch + 1) % cfg.save_every == 0:
+                ckpt = output_dir / f"echo_epoch{epoch + 1}.pt"
+                torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                            "step": step, "epoch": epoch + 1, "val_loss": val_loss}, ckpt)
+                print_info("Checkpoint", str(ckpt), Colors.OKCYAN)
+
+            if epochs_no_improve >= cfg.early_stop:
+                print_info("Early stopping", f"no improvement for {epochs_no_improve} epochs",
+                           Colors.WARNING)
+                break
+
     # --- Final save -----------------------------------------------------------
     ckpt = output_dir / "echo_final.pt"
     torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                "step": step}, ckpt)
+                "step": step, "epoch": cfg.num_epochs, "val_loss": val_loss}, ckpt)
     print_separator()
+    print_info("Best val loss", f"{best_val_loss:.6f}", Colors.OKCYAN)
     print_info("Final checkpoint", str(ckpt), Colors.OKCYAN)
     print_info("Total time", f"{time.perf_counter() - t_start:.1f}s", Colors.OKCYAN)
     log_file.close()

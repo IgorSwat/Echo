@@ -20,6 +20,7 @@ class TrainingConfig:
     num_workers: int
     log_every: int
     save_every: int
+    early_stop: int
     seed: int
     text_dropout: float
 

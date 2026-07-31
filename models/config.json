@@ -60,7 +60,8 @@
     "grad_clip": 1.0,
     "num_workers": 4,
     "log_every": 20,
-    "save_every": 2000,
+    "save_every": 2,
+    "early_stop": 5,
     "seed": 42,
     "text_dropout": 0.2
   }
