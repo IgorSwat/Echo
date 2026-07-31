@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import math
 import sys
 import time
@@ -103,6 +104,10 @@ def main() -> None:
     data_dir = _REPO_ROOT / cfg.data_dir
     output_dir = _REPO_ROOT / cfg.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    log_file = output_dir / "training_log.csv"
+    log_fh = open(log_file, "w", newline="")
+    log_writer = csv.writer(log_fh, delimiter="\t")
+    log_writer.writerow(["step", "epoch", "train_loss", "val_loss", "lr"])
 
     print_header("Supertonic - Flow Matching Training")
     print_separator()
@@ -179,12 +184,14 @@ def main() -> None:
 
             if step % cfg.log_every == 0:
                 elapsed = time.perf_counter() - t_start
+                lr = scheduler.get_last_lr()[0]
                 print_info(
                     f"epoch {epoch + 1}/{cfg.num_epochs} step {step}/{total_steps}",
-                    f"loss {loss.item():.4f} | lr {scheduler.get_last_lr()[0]:.2e}"
+                    f"loss {loss.item():.4f} | lr {lr:.2e}"
                     f" | {elapsed / step:.2f}s/it",
                     Colors.OKGREEN,
                 )
+                log_writer.writerow([step, epoch + 1, f"{loss.item():.6f}", "", f"{lr:.2e}"])
 
             if step % cfg.save_every == 0:
                 ckpt = output_dir / f"supertonic_step{step}.pt"
@@ -203,11 +210,13 @@ def main() -> None:
             model.train()
             print_info(f"epoch {epoch + 1}/{cfg.num_epochs} val",
                        f"loss {val_loss:.4f}", Colors.WARNING)
+            log_writer.writerow([step, epoch + 1, "", f"{val_loss:.6f}", f"{scheduler.get_last_lr()[0]:.2e}"])
 
     # --- Final save -----------------------------------------------------------
     ckpt = output_dir / "supertonic_final.pt"
     torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                 "step": step}, ckpt)
+    log_fh.close()
     print_separator()
     print_info("Final checkpoint", str(ckpt), Colors.OKCYAN)
     print_info("Total time", f"{time.perf_counter() - t_start:.1f}s", Colors.OKCYAN)
