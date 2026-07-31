@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader, random_split
 from __style__ import Colors, print_header, print_info, print_section, print_separator
 
 from echo import config
-from echo.model import Echo
+from echo.fm_model import EchoFM
 from echo.tokenizer import Tokenizer
 from echo.training.collate import collate_fn
 from echo.training.dataset import EchoDataset
@@ -53,7 +53,7 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) ->
 
 
 def _flow_matching_loss(
-    model: Echo,
+    model: EchoFM,
     batch: dict[str, torch.Tensor],
     device: torch.device,
     text_dropout_p: float = 0.0,
@@ -136,7 +136,7 @@ def main() -> None:
     )
 
     # --- Model / optimizer --------------------------------------------------
-    model = Echo().to(device)
+    model = EchoFM().to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
     )

@@ -35,7 +35,7 @@ from __style__ import (
 )
 
 from echo import config
-from echo.model import Echo
+from echo.fm_model import EchoFM
 
 
 def _count_params(module: torch.nn.Module) -> int:
@@ -47,7 +47,7 @@ def _fmt(n: int) -> str:
 
 
 def main() -> None:
-    model = Echo()
+    model = EchoFM()
     model.eval()
 
     total = _count_params(model)

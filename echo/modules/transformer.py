@@ -44,7 +44,8 @@ class SelfAttentionBlock(nn.Module):
 
 
 class CrossAttentionBlock(nn.Module):
-    """Pre-norm transformer block with cross-attention over an external context.
+    """
+    Pre-norm transformer block with cross-attention over an external context.
 
     Query and context streams may have different hidden dims (d_query / d_kv);
     both are projected to d_model inside the CrossAttention. The residual path
@@ -88,13 +89,15 @@ class CrossAttentionBlock(nn.Module):
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
         query_padding_mask: Optional[torch.Tensor] = None,          # (B, T) or None
     ) -> torch.Tensor:
-        residual = self.resid_proj(x) if self.needs_proj else x        # (B, T, d_model)
         q, g1 = self.norm_q(x, cond)                                 # (B, T, d_query), (B, d_query)
         ctx, _ = self.norm_ctx(context, cond)                        # (B, S, d_kv)
         delta = self.attn(q, ctx, key_padding_mask, query_padding_mask)
         if not self.needs_proj:
             delta = g1[:, None, :] * delta
-        x = residual + delta                                         # (B, T, d_model)
+
+        residual = self.resid_proj(x) if self.needs_proj else x        # (B, T, d_model)
+        x = residual + delta                                           # (B, T, d_model)
+
         h, g2 = self.norm2(x, cond)                                  # (B, T, d_model), (B, d_model)
         x = x + g2[:, None, :] * self.ffn(h)                         # (B, T, d_model)
 

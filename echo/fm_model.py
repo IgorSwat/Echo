@@ -12,9 +12,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class Echo(nn.Module):
+class EchoFM(nn.Module):
     """
-    Echo: text- and time-conditioned audio latent diffusion backbone.
+    EchoFM: text- and time-conditioned audio latent diffusion backbone.
 
     Pipeline:
       1. Encode time  -> (B, time_embedding_dim) conditioning vector (AdaLN).

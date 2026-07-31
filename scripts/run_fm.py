@@ -41,7 +41,7 @@ from bluecodec import BlueCodec
 from __style__ import Colors, print_header, print_info, print_section, print_separator
 
 from echo import config
-from echo.model import Echo
+from echo.fm_model import EchoFM
 from echo.tokenizer import Tokenizer
 
 # BlueCodec operates at 44.1 kHz with a hop of 512 samples per latent frame.
@@ -58,7 +58,7 @@ def _select_device() -> torch.device:
 
 
 def _velocity(
-    model: Echo,
+    model: EchoFM,
     text_ids: torch.Tensor,
     x: torch.Tensor,
     t: torch.Tensor,
@@ -79,7 +79,7 @@ def _velocity(
 
 @torch.no_grad()
 def _generate(
-    model: Echo,
+    model: EchoFM,
     text_ids: torch.Tensor,
     x0: torch.Tensor,
     steps: int,
@@ -124,7 +124,7 @@ def _load_and_normalize_distil(
 
 @torch.no_grad()
 def _generate_one(
-    model: Echo,
+    model: EchoFM,
     tokenizer: Tokenizer,
     codec: BlueCodec,
     text: str,
@@ -193,7 +193,7 @@ def main() -> None:
     stats = _load_latent_stats(stats_path, device)
 
     # --- Model --------------------------------------------------------------
-    model = Echo().to(device)
+    model = EchoFM().to(device)
     ckpt = torch.load(args.model, map_location=device)
     model.load_state_dict(ckpt.get("model", ckpt))
     model.eval()

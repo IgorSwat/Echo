@@ -38,7 +38,7 @@ from __style__ import (
 )
 
 from echo import config
-from echo.model import Echo
+from echo.fm_model import EchoFM
 
 T_TEXT_VALUES = [32, 64, 128]
 T_AUDIO_VALUES = [200, 400, 600, 800]
@@ -49,7 +49,7 @@ def _fmt_ms(secs: float) -> str:
 
 
 def _time_forward(
-    model: Echo,
+    model: EchoFM,
     text: torch.Tensor,
     latent: torch.Tensor,
     time_tensor: torch.Tensor,
@@ -99,7 +99,7 @@ def main() -> None:
     else:
         device = torch.device(args.device)
 
-    model = Echo().to(device)
+    model = EchoFM().to(device)
     model.eval()
 
     total_params = sum(p.numel() for p in model.parameters())
