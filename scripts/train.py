@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
@@ -81,12 +83,22 @@ def _flow_matching_loss(
 
 def main() -> None:
     cfg = config.training
+
+    # --- Reproducibility ----------------------------------------------------
     torch.manual_seed(cfg.seed)
+    torch.cuda.manual_seed_all(cfg.seed)
+    np.random.seed(cfg.seed)
+    random.seed(cfg.seed)
 
     device = _select_device()
     data_dir = _REPO_ROOT / cfg.data_dir
     output_dir = _REPO_ROOT / cfg.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Loss log -----------------------------------------------------------
+    loss_log = output_dir / "loss_log.csv"
+    log_file = open(loss_log, "w", encoding="utf-8")
+    log_file.write("step,epoch,train_loss,val_loss,lr\n")
 
     print_header("Echo - Flow Matching Training")
     print_separator()
@@ -168,12 +180,15 @@ def main() -> None:
 
             if step % cfg.log_every == 0:
                 elapsed = time.perf_counter() - t_start
+                lr = scheduler.get_last_lr()[0]
                 print_info(
                     f"epoch {epoch + 1}/{cfg.num_epochs} step {step}/{total_steps}",
-                    f"loss {loss.item():.4f} | lr {scheduler.get_last_lr()[0]:.2e}"
+                    f"loss {loss.item():.4f} | lr {lr:.2e}"
                     f" | {elapsed / step:.2f}s/it",
                     Colors.OKGREEN,
                 )
+                log_file.write(f"{step},{epoch + 1},{loss.item():.6f},,{lr:.6e}\n")
+                log_file.flush()
 
             if step % cfg.save_every == 0:
                 ckpt = output_dir / f"echo_step{step}.pt"
@@ -191,8 +206,11 @@ def main() -> None:
                     val_loss += _flow_matching_loss(model, batch, device).item()
             val_loss /= len(val_loader)
             model.train()
+            lr = scheduler.get_last_lr()[0]
             print_info(f"epoch {epoch + 1}/{cfg.num_epochs} val",
                        f"loss {val_loss:.4f} (train: {train_loss_avg:.4f})", Colors.WARNING)
+            log_file.write(f"{step},{epoch + 1},{train_loss_avg:.6f},{val_loss:.6f},{lr:.6e}\n")
+            log_file.flush()
 
     # --- Final save -----------------------------------------------------------
     ckpt = output_dir / "echo_final.pt"
@@ -201,6 +219,7 @@ def main() -> None:
     print_separator()
     print_info("Final checkpoint", str(ckpt), Colors.OKCYAN)
     print_info("Total time", f"{time.perf_counter() - t_start:.1f}s", Colors.OKCYAN)
+    log_file.close()
 
 
 if __name__ == "__main__":
