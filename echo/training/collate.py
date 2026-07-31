@@ -6,26 +6,29 @@ from echo import config
 
 
 def collate_fn(
-    batch: list[tuple[torch.Tensor, torch.Tensor]],
+    batch: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
 ) -> dict[str, torch.Tensor]:
     """
-    Pads a batch of (text, audio_latent) pairs into uniform tensors and
-    builds boolean key-padding masks (True = valid, False = padding).
+    Pads a batch of (text, audio_latent, distil_latent) triples into uniform
+    tensors and builds boolean key-padding masks (True = valid, False = padding).
 
-    Text is padded with ``config.text_pad``; audio latents are zero-padded.
+    Text is padded with ``config.text_pad``; audio and distil latents are zero-padded.
 
     Args:
-        batch: list of ``(text, audio_latent)`` tuples where
-            text        — ``(T_text,)``        long
-            audio_latent — ``(T_audio, C)``    float
+        batch: list of ``(text, audio_latent, distil_latent)`` tuples where
+            text            — ``(T_text,)``           long
+            audio_latent    — ``(T_audio, C)``        float
+            distil_latent   — ``(T_audio, C)``        float
 
     Returns dict with:
-        text                  — ``(B, S)``         long
-        latent               — ``(B, T, C)``      float
-        text_key_padding_mask       — ``(B, S)``  bool  (True = valid)
-        latent_key_padding_mask     — ``(B, T)``  bool  (True = valid)
+        text                          — ``(B, S)``      long
+        latent                        — ``(B, T, C)``   float
+        distil                        — ``(B, T, C)``   float
+        text_key_padding_mask         — ``(B, S)``      bool  (True = valid)
+        latent_key_padding_mask       — ``(B, T)``      bool  (True = valid)
+        distil_key_padding_mask       — ``(B, T)``      bool  (True = valid)
     """
-    texts, audios = zip(*batch)
+    texts, audios, distils = zip(*batch)
     B = len(texts)
     C = config.latent_dim
 
@@ -52,9 +55,19 @@ def collate_fn(
 
     audio_mask = torch.arange(T).unsqueeze(0) < audio_lengths.unsqueeze(1)  # (B, T)
 
+    # --- Distil latent ---
+    distils = [d.squeeze(0) if d.dim() == 3 and d.size(0) == 1 else d for d in distils]
+    padded_distils = torch.zeros((B, T, C), dtype=torch.float32)
+    for i, d in enumerate(distils):
+        padded_distils[i, : d.size(0)] = d
+
+    distil_mask = audio_mask  # same lengths as audio
+
     return {
         "text": padded_texts,
         "latent": padded_audios,
+        "distil": padded_distils,
         "text_key_padding_mask": text_mask,
         "latent_key_padding_mask": audio_mask,
+        "distil_key_padding_mask": distil_mask,
     }

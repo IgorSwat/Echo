@@ -56,7 +56,7 @@ def _flow_matching_loss(
     device: torch.device,
     text_dropout_p: float = 0.0,
 ) -> torch.Tensor:
-    """Interpolate between noise x0 and data x1; predict the velocity x1 - x0.
+    """Interpolate between distil x0 and data x1; predict the velocity x1 - x0.
 
     With probability ``text_dropout_p`` (per sample), the text conditioning is
     replaced by the model's learned null-text condition, enabling
@@ -64,10 +64,9 @@ def _flow_matching_loss(
     """
     text = batch["text"].to(device)
     x1 = batch["latent"].to(device)
+    x0 = batch["distil"].to(device)
     text_mask = batch["text_key_padding_mask"].to(device)
     latent_mask = batch["latent_key_padding_mask"].to(device)
-
-    x0 = torch.randn_like(x1)
     t = torch.rand(x1.shape[0], device=device)
     xt = (1.0 - t[:, None, None]) * x0 + t[:, None, None] * x1
     target = x1 - x0
@@ -95,9 +94,10 @@ def main() -> None:
     # --- Data ---------------------------------------------------------------
     tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")
     latent_dir = data_dir / "latents"
+    distils_dir = data_dir / "distils"
     latent_stats = latent_dir / "latent_stats.npz"
     dataset = EchoDataset(
-        data_dir / "phonemes.csv", latent_dir, tokenizer,
+        data_dir / "phonemes.csv", latent_dir, distils_dir, tokenizer,
         latent_stats=latent_stats,
     )
 
