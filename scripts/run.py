@@ -2,21 +2,25 @@
 """Generate audio with a trained Echo flow-matching model.
 
 The model is trained with conditional flow matching
-(``x_t = (1 - t) * noise + t * data``, velocity target ``data - noise``), so
-sampling starts from Gaussian noise at ``t = 0`` and solves the ODE
+(``x_t = (1 - t) * distil + t * data``, velocity target ``data - distil``), so
+sampling starts from the provided distil latent at ``t = 0`` and solves the ODE
 ``dx/dt = v(x, t)`` up to ``t = 1`` with a proper numerical integrator
 (``--solver euler`` or the second-order ``--solver midpoint``/RK2).
 The resulting audio latent is decoded to a waveform with BlueCodec.
 
 Usage:
-    python scripts/run.py --model checkpoints/echo_final.pt --text "həlˈOʊ wˈɜːld" \
-        --duration 3.0 --steps 8 --cfg 3.0 --output out.wav
+    # Single sample
+    python scripts/run.py --model checkpoints/echo_final.pt --text "həlˈOʊ wˈɜːld" \\
+        --distil data/distils/clone_0000.npz --steps 8 --cfg 3.0 --output out.wav
+
+    # Full test suite
+    python scripts/run.py --model checkpoints/echo_final.pt \\
+        --test-suite data/norbi/phonemes_test.csv --steps 8 --cfg 3.0
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -77,12 +81,12 @@ def _velocity(
 def _generate(
     model: Echo,
     text_ids: torch.Tensor,
-    num_frames: int,
+    x0: torch.Tensor,
     steps: int,
     cfg_scale: float,
     solver: str,
 ) -> torch.Tensor:
-    """Integrate the velocity field from t=0 (noise) to t=1 (data).
+    """Integrate the velocity field from t=0 (distil) to t=1 (data).
 
     ``euler``    -- x <- x + v(x, t_i) * dt with t_i = i / steps; the canonical
                     flow-matching sampler (1 model evaluation per step).
@@ -91,7 +95,7 @@ def _generate(
                     evaluated there (2 model evaluations per step).
     """
     dt = 1.0 / steps
-    x = torch.randn(1, num_frames, config.latent_dim, device=text_ids.device)
+    x = x0
     for i in range(steps):
         t0 = torch.full((1,), i / steps, device=text_ids.device)
         if solver == "euler":
@@ -102,6 +106,49 @@ def _generate(
             t_mid = torch.full((1,), (i + 0.5) / steps, device=text_ids.device)
             x = x + dt * _velocity(model, text_ids, x_mid, t_mid, cfg_scale)
     return x                                                              # (1, T, C)
+
+
+def _load_and_normalize_distil(
+    distil_path: Path,
+    device: torch.device,
+    stats: tuple[torch.Tensor, torch.Tensor] | None,
+) -> tuple[torch.Tensor, float]:
+    d_arr = np.load(distil_path)["latents"]                          # (C, T)
+    distil = torch.from_numpy(d_arr.T.copy()).float().to(device)     # (T, C)
+    duration = distil.shape[0] * _HOP / _SAMPLE_RATE
+    if stats is not None:
+        mean, std = stats
+        distil = (distil - mean) / std
+    return distil, duration
+
+
+@torch.no_grad()
+def _generate_one(
+    model: Echo,
+    tokenizer: Tokenizer,
+    codec: BlueCodec,
+    text: str,
+    distil: torch.Tensor,
+    duration: float,
+    steps: int,
+    cfg_scale: float,
+    solver: str,
+    stats: tuple[torch.Tensor, torch.Tensor] | None,
+    device: torch.device,
+    output_path: Path,
+) -> None:
+    text_ids = torch.tensor([tokenizer.tokenize(text)], dtype=torch.long, device=device)
+    x0 = distil.unsqueeze(0)  # (1, T, C)
+    latent = _generate(model, text_ids, x0, steps, cfg_scale, solver)  # (1, T, C)
+    if stats is not None:
+        mean, std = stats
+        latent = latent * std + mean
+    audio = codec.decode(latent.transpose(1, 2))                      # (B, C, T) -> audio
+    audio = audio.squeeze(0).cpu()
+    if audio.dim() == 1:
+        audio = audio.unsqueeze(0)
+    audio = audio[..., : int(duration * _SAMPLE_RATE)]
+    torchaudio.save(str(output_path), audio, _SAMPLE_RATE)
 
 
 def _load_latent_stats(stats_path: Path, device: torch.device) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -117,8 +164,11 @@ def _load_latent_stats(stats_path: Path, device: torch.device) -> tuple[torch.Te
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate audio with Echo.")
     parser.add_argument("--model", type=str, required=True, help="Path to a training checkpoint (.pt).")
-    parser.add_argument("--text", type=str, required=True, help="Phoneme string to synthesize.")
-    parser.add_argument("--duration", type=float, required=True, help="Audio duration in seconds.")
+    parser.add_argument("--text", type=str, default=None, help="Phoneme string to synthesize.")
+    parser.add_argument("--distil", type=str, default=None,
+                        help="Path to a .npz file with the starting distil latent (shape (C, T)).")
+    parser.add_argument("--test-suite", type=str, default=None,
+                        help="Path to a phonemes CSV file (e.g. phonemes_test.csv) for batch generation.")
     parser.add_argument("--steps", type=int, default=8, help="Flow-matching integration steps (default: 8).")
     parser.add_argument("--solver", choices=("euler", "midpoint"), default="euler",
                         help="ODE integrator: 'euler' (1 model eval/step, default) or "
@@ -127,31 +177,20 @@ def main() -> None:
                         help="Classifier-free guidance scale (default: 3.0; 1.0 disables guidance).")
     parser.add_argument(
         "--stats", type=str, default=None,
-        help="Path to latent_stats.npz (mean/std) used to denormalize latents before codec decode. "
+        help="Path to latent_stats.npz (mean/std) used to normalize/denormalize latents. "
              "Defaults to <data_dir>/latents/latent_stats.npz from the training config.",
     )
-    parser.add_argument("--output", type=str, default="output.wav", help="Output audio path.")
+    parser.add_argument("--output", type=str, default="output.wav", help="Output audio path (single-sample mode).")
     args = parser.parse_args()
 
-    device = _select_device()
+    if args.test_suite is None and (args.text is None or args.distil is None):
+        parser.error("--text and --distil are required when --test-suite is not provided")
 
-    print_header("Echo - Generation")
-    print_separator()
-    print_section("Setup")
-    print_info("Device", str(device), Colors.OKCYAN)
-    print_info("Checkpoint", args.model)
-    print_info("Steps", str(args.steps))
-    print_info("Solver", args.solver)
-    print_info("CFG scale", str(args.cfg))
-    print_info("Duration", f"{args.duration:.2f}s")
+    device = _select_device()
 
     # --- Latent normalization stats -----------------------------------------
     stats_path = Path(args.stats) if args.stats else _REPO_ROOT / config.training.data_dir / "latents" / "latent_stats.npz"
     stats = _load_latent_stats(stats_path, device)
-    if stats is not None:
-        print_info("Latent denorm", f"enabled ({stats_path})", Colors.OKCYAN)
-    else:
-        print_info("Latent denorm", f"disabled (stats not found: {stats_path})", Colors.WARNING)
 
     # --- Model --------------------------------------------------------------
     model = Echo().to(device)
@@ -159,35 +198,79 @@ def main() -> None:
     model.load_state_dict(ckpt.get("model", ckpt))
     model.eval()
 
-    # --- Text -----------------------------------------------------------------
     tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")
-    text_ids = torch.tensor([tokenizer.tokenize(args.text)], dtype=torch.long, device=device)
 
-    # --- Sample ---------------------------------------------------------------
-    num_frames = math.ceil(args.duration * _SAMPLE_RATE / _HOP)
-    print_info("Latent frames", str(num_frames))
-
-    latent = _generate(model, text_ids, num_frames, args.steps, args.cfg, args.solver)  # (1, T, C)
-
-    # --- Denormalize ----------------------------------------------------------
-    # The model operates in channel-normalized latent space; BlueCodec expects
-    # its native (raw) latent scale, so undo the z-scoring before decoding.
-    if stats is not None:
-        mean, std = stats
-        latent = latent * std + mean
-
-    # --- Decode ---------------------------------------------------------------
+    # --- Codec (loaded once) ------------------------------------------------
     codec = BlueCodec.from_pretrained("notmax123/blue-codec", device=str(device))
-    with torch.no_grad():
-        audio = codec.decode(latent.transpose(1, 2))                      # (B, C, T) -> audio
-    audio = audio.squeeze(0).cpu()
-    if audio.dim() == 1:
-        audio = audio.unsqueeze(0)
-    audio = audio[..., : int(args.duration * _SAMPLE_RATE)]
 
-    torchaudio.save(args.output, audio, _SAMPLE_RATE)
-    print_separator()
-    print_info("Saved", args.output, Colors.OKGREEN)
+    if args.test_suite is not None:
+        # --- Test suite mode ------------------------------------------------
+        test_csv = Path(args.test_suite)
+        distils_dir = test_csv.parent / "distils"
+        test_entries: list[tuple[str, str]] = []
+        with open(test_csv, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                npz_name, phonemes = line.split("|", 1)
+                test_entries.append((npz_name.strip(), phonemes.strip()))
+
+        print_header("Echo - Test Suite")
+        print_separator()
+        print_section("Setup")
+        print_info("Device", str(device), Colors.OKCYAN)
+        print_info("Checkpoint", args.model)
+        print_info("Test suite", str(test_csv))
+        print_info("Entries", str(len(test_entries)))
+        print_info("Steps", str(args.steps))
+        print_info("Solver", args.solver)
+        print_info("CFG scale", str(args.cfg))
+        if stats is not None:
+            print_info("Latent norm", f"enabled ({stats_path})", Colors.OKCYAN)
+        else:
+            print_info("Latent norm", f"disabled (stats not found: {stats_path})", Colors.WARNING)
+
+        for i, (npz_name, phonemes) in enumerate(test_entries):
+            distil_path = distils_dir / npz_name
+            distil, duration = _load_and_normalize_distil(distil_path, device, stats)
+            out_name = Path(npz_name).stem + ".wav"
+            output_path = test_csv.parent / "test_outputs" / out_name
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            _generate_one(model, tokenizer, codec, phonemes, distil, duration,
+                          args.steps, args.cfg, args.solver, stats, device, output_path)
+
+            print_info(f"[{i + 1}/{len(test_entries)}]", f"{npz_name} -> {output_path.name}",
+                       Colors.OKGREEN)
+
+        print_separator()
+        print_info("Done", f"{len(test_entries)} files saved", Colors.OKGREEN)
+    else:
+        # --- Single-sample mode ---------------------------------------------
+        distil_path = Path(args.distil)
+        distil, duration = _load_and_normalize_distil(distil_path, device, stats)
+
+        print_header("Echo - Generation")
+        print_separator()
+        print_section("Setup")
+        print_info("Device", str(device), Colors.OKCYAN)
+        print_info("Checkpoint", args.model)
+        print_info("Distil", str(distil_path))
+        print_info("Duration", f"{duration:.2f}s")
+        print_info("Steps", str(args.steps))
+        print_info("Solver", args.solver)
+        print_info("CFG scale", str(args.cfg))
+        if stats is not None:
+            print_info("Latent norm", f"enabled ({stats_path})", Colors.OKCYAN)
+        else:
+            print_info("Latent norm", f"disabled (stats not found: {stats_path})", Colors.WARNING)
+
+        _generate_one(model, tokenizer, codec, args.text, distil, duration,
+                      args.steps, args.cfg, args.solver, stats, device, Path(args.output))
+
+        print_separator()
+        print_info("Saved", args.output, Colors.OKGREEN)
 
 
 if __name__ == "__main__":
