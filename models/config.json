@@ -5,7 +5,7 @@
 
   "vocab_size": {
     "text": 256,
-    "prosody": 2050
+    "prosody": 2051
   },
 
   "limits": {
@@ -15,7 +15,8 @@
   "special_tokens": {
     "text_pad": 0,
     "prosody_pad": 2048,
-    "prosody_eos": 2049
+    "prosody_bos": 2049,
+    "prosody_eos": 2050
   },
 
   "ar_model": {

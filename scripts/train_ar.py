@@ -45,32 +45,39 @@ def _lr_lambda(step: int, warmup_steps: int, total_steps: int) -> float:
     return 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
-def _append_eos(codec: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Write a ``[prosody_eos, prosody_eos]`` frame after each sequence's last real frame.
+def _add_bos_eos(
+    codec: torch.Tensor,
+    mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Wrap each sequence as ``[BOS, frame_0 ... frame_{L-1}, EOS]``, right-padded.
 
-    Padding sits at the end of every sequence, so the EOS frame goes at index
-    ``length`` and the tensor grows by one along time. Positions past the EOS
-    stay ``prosody_pad``.
+    Padding sits at the end of every sequence, so BOS goes at index 0, the real
+    frames shift one step right, and EOS lands at index ``length + 1``. The
+    tensor grows by two along time; positions past the EOS stay ``prosody_pad``.
 
     Args:
         codec: ``(B, T, L)`` token ids, right-padded with ``config.prosody_pad``.
         mask:  ``(B, T)`` bool, True on real frames.
 
-    Returns ``(B, T + 1, L)``.
+    Returns ``(B, T + 2, L)`` and its ``(B, T + 2)`` validity mask.
     """
     B, T, L = codec.shape
     lengths = mask.sum(dim=1)                                    # (B,)
 
     seq = torch.full(
-        (B, T + 1, L), config.prosody_pad, dtype=codec.dtype, device=codec.device
+        (B, T + 2, L), config.prosody_pad, dtype=codec.dtype, device=codec.device
     )
+    seq[:, 0] = config.prosody_bos
     # Copy real frames only: whatever sits in the padded region of `codec` must
     # not survive into the targets, where it would be supervised instead of
     # skipped by the loss's ignore_index.
-    seq[:, :T] = codec.masked_fill(~mask.unsqueeze(-1), config.prosody_pad)
-    seq[torch.arange(B, device=codec.device), lengths] = config.prosody_eos
+    seq[:, 1 : T + 1] = codec.masked_fill(~mask.unsqueeze(-1), config.prosody_pad)
+    seq[torch.arange(B, device=codec.device), lengths + 1] = config.prosody_eos
 
-    return seq                                                   # (B, T + 1, L)
+    # BOS and EOS are both real positions, hence lengths + 2.
+    seq_mask = torch.arange(T + 2, device=codec.device)[None] < (lengths + 2)[:, None]
+
+    return seq, seq_mask                                         # (B, T + 2, L), (B, T + 2)
 
 
 def _ar_loss(
@@ -80,24 +87,28 @@ def _ar_loss(
 ) -> torch.Tensor:
     """Teacher-forced next-token cross-entropy over both codebook layers.
 
-    The EOS-terminated sequence is split into input and target halves shifted by
-    one frame, so the model reads frame i and predicts frame i+1 — including the
-    EOS that follows the final real frame. Padded targets are dropped via
-    ``ignore_index``; a real token can never collide with the pad id because the
-    codec alphabet stops below ``prosody_pad``.
+    The BOS/EOS-wrapped sequence is split into input and target halves shifted
+    by one frame, so the model reads frame i and predicts frame i+1: BOS gives
+    the first real frame, and the last real frame gives the EOS. The shift is
+    what keeps BOS out of the targets — it is only ever read, never predicted.
+    Padded targets are dropped via ``ignore_index``; a real token can never
+    collide with the pad id because the codec alphabet stops below
+    ``prosody_pad``.
     """
     codec = batch["codec"].to(device)                            # (B, T, 2)
     text = batch["text"].to(device)                              # (B, S)
     codec_mask = batch["codec_key_padding_mask"].to(device)      # (B, T)
     text_mask = batch["text_key_padding_mask"].to(device)        # (B, S)
 
-    seq = _append_eos(codec, codec_mask)                         # (B, T + 1, 2)
-    inputs = seq[:, :-1]                                         # (B, T, 2)
-    targets = seq[:, 1:]                                         # (B, T, 2)
+    seq, seq_mask = _add_bos_eos(codec, codec_mask)              # (B, T + 2, 2), (B, T + 2)
+    inputs = seq[:, :-1]                                         # (B, T + 1, 2)
+    targets = seq[:, 1:]                                         # (B, T + 1, 2)
+    # Shifting the mask the same way as the targets leaves exactly the positions
+    # that carry a supervised prediction: BOS plus every real frame, stopping
+    # short of the EOS itself (which is only ever a target, never read).
+    input_mask = seq_mask[:, 1:]                                 # (B, T + 1)
 
-    # The input keeps exactly the real frames of `codec`, so its padding mask is
-    # unchanged; the shifted targets have the same count (last one is the EOS).
-    logits = model(inputs, text, codec_mask, text_mask)          # (B, T, 2, V)
+    logits = model(inputs, text, input_mask, text_mask)          # (B, T + 1, 2, V)
 
     return F.cross_entropy(
         logits.reshape(-1, logits.shape[-1]),
@@ -175,8 +186,8 @@ def main() -> None:
     print_info("Device", str(device), Colors.OKCYAN)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
     print_info("Codec layers", str(EchoAR.NUM_TOKEN_LAYERS))
-    print_info("Prosody vocab", f"{config.prosody_vocab_size:,} "
-                                f"(pad {config.prosody_pad}, eos {config.prosody_eos})")
+    print_info("Prosody vocab", f"{config.prosody_vocab_size:,} (pad {config.prosody_pad}, "
+                                f"bos {config.prosody_bos}, eos {config.prosody_eos})")
     print_info("Parameters", f"{sum(p.numel() for p in model.parameters()):,}")
     print_info("Batch size", str(cfg.batch_size))
     print_info("Total steps", str(total_steps))

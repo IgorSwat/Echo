@@ -163,6 +163,7 @@ class EchoConfig:
     # Special tokens
     text_pad: int
     prosody_pad: int
+    prosody_bos: int
     prosody_eos: int
 
     # Flow-matching model (EchoFM)
@@ -188,6 +189,7 @@ class EchoConfig:
             text_len_limit=d["limits"]["text_len"],
             text_pad=d["special_tokens"]["text_pad"],
             prosody_pad=d["special_tokens"]["prosody_pad"],
+            prosody_bos=d["special_tokens"]["prosody_bos"],
             prosody_eos=d["special_tokens"]["prosody_eos"],
             fm_model=FMModelConfig.from_dict(d["fm_model"]),
             ar_model=ARModelConfig.from_dict(d["ar_model"]),
