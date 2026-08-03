@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Detailed parameter breakdown of the Echo model.
+"""Detailed parameter breakdown of the Echo models.
 
-Reports parameter counts for the TimeEncoder, TextEncoder, and each block in
-the main processing stack, grouped by block type.
+For EchoFM, reports parameter counts for the TimeEncoder, TextEncoder, and each
+block in the main processing stack, grouped by block type. For EchoAR, reports
+the token embeddings, TextEncoder, causal conv front-end, decoder blocks and
+the per-token-layer heads.
 
 Usage:
     python scripts/count_params.py
+    python scripts/count_params.py --model ar
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -35,6 +39,7 @@ from __style__ import (
 )
 
 from echo import config
+from echo.ar_model import EchoAR
 from echo.fm_model import EchoFM
 
 
@@ -46,45 +51,23 @@ def _fmt(n: int) -> str:
     return f"{n:,}"
 
 
-def main() -> None:
-    model = EchoFM()
-    model.eval()
-
-    total = _count_params(model)
-
-    print_test_title("Echo — Parameter Breakdown")
-
-    # --- Top-level components ---
-    print_section("Top-level components")
-
-    time_params = _count_params(model.time_encoder)
-    text_params = _count_params(model.text_encoder)
-    blocks_params = _count_params(model.blocks)
-    final_params = _count_params(model.final_norm) + _count_params(model.out_proj)
-
-    components = [
-        ("TimeEncoder", time_params),
-        ("TextEncoder", text_params),
-        ("Main blocks", blocks_params),
-        ("Final norm + out_proj", final_params),
-    ]
-
+def _print_components(components: list[tuple[str, int]], total: int) -> None:
+    """Component table with a share-of-total bar."""
     for label, n in components:
         pct = 100.0 * n / total if total else 0.0
         bar_len = int(round(pct / 100.0 * 30))
         bar = Colors.OKGREEN + "█" * bar_len + Colors.ENDC + "░" * (30 - bar_len)
         print(f"  {Colors.BOLD}{label:<22}{Colors.ENDC} {_fmt(n):>12}  {pct:5.1f}%  {bar}")
 
-    print_separator()
-    print_info("Total", _fmt(total), Colors.OKCYAN)
 
-    # --- Per-block breakdown ---
-    print_section("Main blocks — per block")
+def _print_blocks(blocks: torch.nn.Module, total: int, label: str) -> None:
+    """Per-block listing followed by an aggregation over block classes."""
+    print_section(f"{label} — per block")
 
     rows = []
     type_totals: OrderedDict[str, list[int]] = OrderedDict()
 
-    for i, block in enumerate(model.blocks):
+    for i, block in enumerate(blocks):
         n = _count_params(block)
         cls_name = type(block).__name__
         rows.append((i, cls_name, n))
@@ -96,7 +79,7 @@ def main() -> None:
         print(f"  [{i}] {Colors.BOLD}{cls_name:<20}{Colors.ENDC} {_fmt(n):>12}  {pct:5.1f}%")
 
     # Aggregated per type
-    print_section("Main blocks — aggregated by type")
+    print_section(f"{label} — aggregated by type")
 
     for cls_name, counts in type_totals.items():
         subtotal = sum(counts)
@@ -107,8 +90,93 @@ def main() -> None:
             f"{_fmt(subtotal)}  (avg {_fmt(int(round(avg)))})  {pct:5.1f}%",
         )
 
+
+def report_fm() -> None:
+    model = EchoFM()
+    model.eval()
+
+    total = _count_params(model)
+
+    print_header("EchoFM — flow-matching backbone")
+
+    # --- Top-level components ---
+    print_section("Top-level components")
+
+    _print_components([
+        ("TimeEncoder", _count_params(model.time_encoder)),
+        ("TextEncoder", _count_params(model.text_encoder)),
+        ("Main blocks", _count_params(model.blocks)),
+        ("Final norm + out_proj",
+         _count_params(model.final_norm) + _count_params(model.out_proj)),
+    ], total)
+
     print_separator()
     print_info("Total", _fmt(total), Colors.OKCYAN)
+
+    # --- Per-block breakdown ---
+    _print_blocks(model.blocks, total, "Main blocks")
+
+    print_separator()
+    print_info("Total", _fmt(total), Colors.OKCYAN)
+
+
+def report_ar() -> None:
+    model = EchoAR()
+    model.eval()
+
+    total = _count_params(model)
+
+    print_header("EchoAR — autoregressive prosody model")
+
+    # --- Top-level components ---
+    print_section("Top-level components")
+
+    components = [
+        (f"Token embeddings (x{len(model.embed)})", _count_params(model.embed)),
+        ("TextEncoder", _count_params(model.text_encoder)),
+        (f"Causal convs (x{len(model.convs)})", _count_params(model.convs)),
+        ("Decoder", _count_params(model.decoder)),
+        (f"Heads (x{len(model.heads)})", _count_params(model.heads)),
+    ]
+    if model.in_proj is not None:
+        components.insert(3, ("Input projection", _count_params(model.in_proj)))
+
+    _print_components(components, total)
+
+    print_separator()
+    print_info("Total", _fmt(total), Colors.OKCYAN)
+
+    # --- Dimensions ---
+    print_section("Dimensions")
+    print_info("Token layers", model.NUM_TOKEN_LAYERS)
+    print_info("Prosody vocab", _fmt(model.vocab_size))
+    print_info("Embedding dim", f"{model.emb_dim} (x{model.NUM_TOKEN_LAYERS} -> "
+                                f"{model.NUM_TOKEN_LAYERS * model.emb_dim})")
+    print_info("Hidden dim", model.hidden_dim)
+    print_info("Text context dim", config.ar_model.text_encoder_d_model)
+
+    # --- Per-block breakdown ---
+    _print_blocks(model.decoder.blocks, total, "Decoder blocks")
+
+    print_separator()
+    print_info("Total", _fmt(total), Colors.OKCYAN)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Echo parameter breakdown.")
+    parser.add_argument("--model", type=str, default="all",
+                        choices=["all", "fm", "ar"],
+                        help="which model to report on (default: all)")
+    args = parser.parse_args()
+
+    print_test_title("Echo — Parameter Breakdown")
+
+    if args.model in ("all", "fm"):
+        report_fm()
+    if args.model in ("all", "ar"):
+        if args.model == "all":
+            print()
+        report_ar()
 
 
 if __name__ == "__main__":

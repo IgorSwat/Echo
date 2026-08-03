@@ -49,7 +49,7 @@ class ConformerBlock(nn.Module):
         x = x + 0.5 * self.ffn1(x)                                   # (B, T, D)
         h, g = self.norm_attn(x, cond)                               # (B, T, D), (B, D)
         x = x + g[:, None, :] * self.attn(h, key_padding_mask)       # (B, T, D)
-        x = x + self.conv(x)                                         # (B, T, D)
+        x = x + self.conv(x, key_padding_mask)                       # (B, T, D)
         x = x + 0.5 * self.ffn2(x)                                   # (B, T, D)
         x, _ = self.norm_out(x, cond)                                # (B, T, D)
 

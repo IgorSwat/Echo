@@ -19,7 +19,7 @@ class EchoFM(nn.Module):
     Pipeline:
       1. Encode time  -> (B, time_embedding_dim) conditioning vector (AdaLN).
       2. Encode text  -> (B, S, text_embedding_dim) conditioning context.
-      3. Run the main processing stack (blocks defined in config["blocks"]).
+      3. Run the main processing stack (blocks defined in config["fm_model"]["blocks"]).
       4. Project hidden -> latent_dim output.
 
     U-Net skips: each `downsample` stashes the current feature; each `skip`
@@ -43,34 +43,36 @@ class EchoFM(nn.Module):
     def __init__(self, audio_in_dim: Optional[int] = None) -> None:
         super().__init__()
 
-        self.hidden_dim = config.text_embedding_dim
-        self.cond_dim = config.time_embedding_dim
+        cfg = config.fm_model
+
+        self.hidden_dim = cfg.text_embedding_dim
+        self.cond_dim = cfg.time_embedding_dim
         self.audio_in_dim = audio_in_dim if audio_in_dim is not None else config.latent_dim
 
         # --- Conditioning streams ---
-        self.time_encoder = TimeEncoder(config.time_embedding_dim)
+        self.time_encoder = TimeEncoder(cfg.time_embedding_dim)
         self.text_encoder = TextEncoder(
             vocab_size=config.text_vocab_size,
-            d_model=config.text_embedding_dim,
-            d_out=config.text_embedding_dim,
-            num_layers=config.text_encoder_num_layers,
-            num_heads=config.text_encoder_num_heads,
-            ffn_dim=config.text_encoder_ffn_dim,
-            ffn_glu=config.text_encoder_ffn_glu,
-            kernel_size=config.text_encoder_kernel_size,
-            dropout=config.text_encoder_dropout,
-            use_rope=config.text_encoder_use_rope,
-            conv_use_norm=config.text_encoder_conv_use_norm,
+            d_model=cfg.text_embedding_dim,
+            d_out=cfg.text_embedding_dim,
+            num_layers=cfg.text_encoder_num_layers,
+            num_heads=cfg.text_encoder_num_heads,
+            ffn_dim=cfg.text_encoder_ffn_dim,
+            ffn_glu=cfg.text_encoder_ffn_glu,
+            kernel_size=cfg.text_encoder_kernel_size,
+            dropout=cfg.text_encoder_dropout,
+            use_rope=cfg.text_encoder_use_rope,
+            conv_use_norm=cfg.text_encoder_conv_use_norm,
             max_seq_len=config.text_len_limit,
         )
 
-        # --- Main processing stack (built from config["blocks"]) ---
+        # --- Main processing stack (built from config["fm_model"]["blocks"]) ---
         # The block flow defines its own dim progression starting from latent_dim.
         self.blocks, out_dim = self._build_blocks()
 
         # Learned null-text condition for classifier-free guidance: replaces the
         # text encoder output for samples whose conditioning is dropped.
-        self.null_text = nn.Parameter(torch.zeros(1, 1, config.text_embedding_dim))
+        self.null_text = nn.Parameter(torch.zeros(1, 1, cfg.text_embedding_dim))
 
         self.final_norm = nn.LayerNorm(out_dim)
         self.out_proj = nn.Linear(out_dim, config.latent_dim)
@@ -82,7 +84,7 @@ class EchoFM(nn.Module):
         cur_dim = self.audio_in_dim
         # Parallel to runtime skip stack: dims of features stashed before each downsample.
         skip_dims: list[int] = []
-        for spec in config.blocks:
+        for spec in config.fm_model.blocks:
             spec = dict(spec)                                          # copy (don't mutate config)
             block_type = spec.pop("type", None)
             if block_type is None:
@@ -194,7 +196,7 @@ class EchoFM(nn.Module):
                         mode="nearest",
                     ).squeeze(1).bool()
             else:                                                      # ConvNeXtBlock, etc.
-                x = block(x, cond)                                     # (B, T', d')
+                x = block(x, cond, mask)                               # (B, T', d')
 
         if skips:
             raise RuntimeError(f"{len(skips)} skip feature(s) left unused after forward")

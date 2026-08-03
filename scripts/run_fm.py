@@ -189,7 +189,7 @@ def main() -> None:
     device = _select_device()
 
     # --- Latent normalization stats -----------------------------------------
-    stats_path = Path(args.stats) if args.stats else _REPO_ROOT / config.training.data_dir / "latents" / "latent_stats.npz"
+    stats_path = Path(args.stats) if args.stats else _REPO_ROOT / config.training.fm.data_dir / "latents" / "latent_stats.npz"
     stats = _load_latent_stats(stats_path, device)
 
     # --- Model --------------------------------------------------------------

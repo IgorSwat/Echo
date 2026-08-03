@@ -61,7 +61,11 @@ class GatedConv(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:                  # (B, T, D)
+    def forward(
+        self,
+        x: torch.Tensor,                                                 # (B, T, D)
+        key_padding_mask: Optional[torch.Tensor] = None,                 # (B, T) or None
+    ) -> torch.Tensor:
         # Optional norm
         if self.use_norm:
             x = self.norm(x)                                             # (B, T, D)
@@ -69,6 +73,15 @@ class GatedConv(nn.Module):
 		# As proposed in "Language Modeling with Gated Convolutional Networks",
         # we use GLU as a form of selective channel mixing.
         x = F.glu(self.pw1(x), dim=-1)                                   # (B, T, D)
+
+        # The conv is the one op here that mixes across time, so padded frames
+        # have to be zeroed right before it: they then contribute 0*w to every
+        # window and a valid output stops depending on how much padding trails
+        # it. Masking earlier would not hold — pw1's bias and the GLU make the
+        # padded frames non-zero again on the way here.
+        if key_padding_mask is not None:
+            x = x * key_padding_mask.unsqueeze(-1).to(x.dtype)           # (B, T, D)
+
         x = F.pad(x.transpose(1, 2), self.pad)                           # (B, D, T + k - 1)
         x = self.dw(x).transpose(1, 2)                                   # (B, T, D)
         x = F.gelu(x)                                                    # (B, T, D)
@@ -157,8 +170,13 @@ class ConvNeXtBlock(nn.Module):
         self,
         x: torch.Tensor,                                              # (B, T, dim_in)
         cond: Optional[torch.Tensor] = None,                          # (B, cond_dim) or None
+        key_padding_mask: Optional[torch.Tensor] = None,              # (B, T) or None
     ) -> torch.Tensor:
-        y = F.pad(x.transpose(1, 2), self.pad)                        # (B, dim_in, T + k - 1)
+        # Zero the padded frames so they contribute nothing to the depthwise
+        # conv, the only time-mixing op in the block. See GatedConv.forward.
+        y = x if key_padding_mask is None else x * key_padding_mask.unsqueeze(-1).to(x.dtype)
+
+        y = F.pad(y.transpose(1, 2), self.pad)                        # (B, dim_in, T + k - 1)
         y = self.dw(y).transpose(1, 2)                                # (B, T, dim_in)
         if self.pw_proj is not None:
             y = self.pw_proj(y)                                        # (B, T, dim_out)

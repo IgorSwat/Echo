@@ -1,8 +1,11 @@
 {
   "latent_dim": 24,
 
+  "init_std": 0.02,
+
   "vocab_size": {
-    "text": 256
+    "text": 256,
+    "prosody": 2050
   },
 
   "limits": {
@@ -10,63 +13,122 @@
   },
 
   "special_tokens": {
-    "text_pad": 0
+    "text_pad": 0,
+    "prosody_pad": 2048,
+    "prosody_eos": 2049
   },
 
-  "text_embedding_dim": 256,
-  "time_embedding_dim": 128,
+  "ar_model": {
+    "emb_dim": 256,
+    "hidden_dim": 512,
 
-  "init_std": 0.02,
+    "text_encoder": {
+      "d_model": 256,
+      "num_layers": 6,
+      "num_heads": 8,
+      "ffn_dim": 1024,
+      "ffn_glu": false,
+      "kernel_size": 5,
+      "dropout": 0.1,
+      "use_rope": true,
+      "conv_use_norm": true
+    },
 
-  "text_encoder": {
-    "num_layers": 6,
-    "num_heads": 8,
-    "ffn_dim": 1024,
-    "ffn_glu": false,
-    "kernel_size": 5,
-    "dropout": 0.1,
-    "use_rope": true,
-    "conv_use_norm": true
+    "conv": {
+      "num_layers": 3,
+      "kernel_size": 5,
+      "dropout": 0.1,
+      "use_norm": true
+    },
+
+    "decoder": {
+      "num_layers": 8,
+      "num_heads": 8,
+      "ffn_dim": 2048,
+      "ffn_glu": false,
+      "dropout": 0.1,
+      "use_rope": true
+    },
+
+    "head": {
+      "num_layers": 2,
+      "hidden_dim": 1024,
+      "dropout": 0.1
+    }
   },
 
-  "blocks": [
-    {"type": "convnext", "dim_in": 24, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
-    {"type": "convnext", "dim_in": 64, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
-    {"type": "convnext", "dim_in": 64, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
-    {"type": "self_attention", "d_model": 128, "num_heads": 4, "ffn_dim": 512, "dropout": 0.1, "use_rope": true},
-    {"type": "convnext", "dim_in": 128, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
-    {"type": "convnext", "dim_in": 128, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
-    {"type": "convnext", "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
-    {"type": "self_attention", "d_model": 256, "num_heads": 4, "ffn_dim": 1024, "dropout": 0.1, "use_rope": true},
-    {"type": "cross_attention", "d_query": 256, "d_kv": 256, "d_model": 256, "num_heads": 8, "ffn_dim": 1024, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
-    {"type": "convnext", "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
-    {"type": "convnext", "dim_in": 256, "dim_out": 512, "kernel_size": 7, "dropout": 0.1},
-    {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true},
-    {"type": "cross_attention", "d_query": 512, "d_kv": 256, "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
-    {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true},
-    {"type": "cross_attention", "d_query": 512, "d_kv": 256, "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
-    {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true},
-    {"type": "cross_attention", "d_query": 512, "d_kv": 256, "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
-    {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true},
-    {"type": "cross_attention", "d_query": 512, "d_kv": 256, "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
-    {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true}
-  ],
+  "fm_model": {
+    "text_embedding_dim": 256,
+    "time_embedding_dim": 128,
+
+    "text_encoder": {
+      "num_layers": 6,
+      "num_heads": 8,
+      "ffn_dim": 1024,
+      "ffn_glu": false,
+      "kernel_size": 5,
+      "dropout": 0.1,
+      "use_rope": true,
+      "conv_use_norm": true
+    },
+
+    "blocks": [
+      {"type": "convnext", "dim_in": 24, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext", "dim_in": 64, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext", "dim_in": 64, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
+      {"type": "self_attention", "d_model": 128, "num_heads": 4, "ffn_dim": 512, "dropout": 0.1, "use_rope": true},
+      {"type": "convnext", "dim_in": 128, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext", "dim_in": 128, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext", "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "self_attention", "d_model": 256, "num_heads": 4, "ffn_dim": 1024, "dropout": 0.1, "use_rope": true},
+      {"type": "cross_attention", "d_query": 256, "d_kv": 256, "d_model": 256, "num_heads": 8, "ffn_dim": 1024, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "convnext", "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext", "dim_in": 256, "dim_out": 512, "kernel_size": 7, "dropout": 0.1},
+      {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true},
+      {"type": "cross_attention", "d_query": 512, "d_kv": 256, "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true},
+      {"type": "cross_attention", "d_query": 512, "d_kv": 256, "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true},
+      {"type": "cross_attention", "d_query": 512, "d_kv": 256, "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true},
+      {"type": "cross_attention", "d_query": 512, "d_kv": 256, "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "self_attention", "d_model": 512, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true}
+    ]
+  },
 
   "training": {
-    "data_dir": "data/norbi",
-    "output_dir": "checkpoints",
-    "batch_size": 16,
-    "num_epochs": 30,
-    "val_ratio": 0.05,
-    "learning_rate": 3e-4,
-    "weight_decay": 0.01,
-    "warmup_steps": 500,
-    "grad_clip": 1.0,
-    "num_workers": 4,
-    "log_every": 20,
-    "save_every": 2,
-    "early_stop": 5,
-    "seed": 42,
-    "text_dropout": 0.2
+    "ar": {
+      "data_dir": "data/norbi",
+      "output_dir": "checkpoints",
+      "batch_size": 16,
+      "num_epochs": 30,
+      "val_ratio": 0.05,
+      "learning_rate": 5e-4,
+      "weight_decay": 0.01,
+      "warmup_steps": 500,
+      "grad_clip": 1.0,
+      "num_workers": 4,
+      "log_every": 20,
+      "save_every": 2,
+      "early_stop": 5,
+      "seed": 42
+    },
+    "fm": {
+      "data_dir": "data/norbi",
+      "output_dir": "checkpoints",
+      "batch_size": 16,
+      "num_epochs": 30,
+      "val_ratio": 0.05,
+      "learning_rate": 3e-4,
+      "weight_decay": 0.01,
+      "warmup_steps": 500,
+      "grad_clip": 1.0,
+      "num_workers": 4,
+      "log_every": 20,
+      "save_every": 2,
+      "early_stop": 5,
+      "seed": 42,
+      "text_dropout": 0.2
+    }
   }
 }
