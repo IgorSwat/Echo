@@ -21,11 +21,12 @@ class SelfAttentionBlock(nn.Module):
         use_ada_ln: bool = False,
         cond_dim: Optional[int] = None,
         ffn_glu: bool = False,
+        mode: str = "bidirectional"
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
         self.norm1 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
-        self.attn = SelfAttention(d_model, num_heads, dropout, use_rope=use_rope)
+        self.attn = SelfAttention(d_model, num_heads, dropout, use_rope=use_rope, mode=mode)
         self.norm2 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.ffn = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
 
@@ -100,5 +101,66 @@ class CrossAttentionBlock(nn.Module):
 
         h, g2 = self.norm2(x, cond)                                  # (B, T, d_model), (B, d_model)
         x = x + g2[:, None, :] * self.ffn(h)                         # (B, T, d_model)
+
+        return x                                                     # (B, T, d_model)
+
+
+class HybridAttentionBlock(nn.Module):
+    """
+    Pre-norm transformer block combining self-attention and cross-attention.
+
+    Equivalent to a SelfAttentionBlock followed by a CrossAttentionBlock that
+    share a single FFN: norm -> self-attn -> add -> norm -> cross-attn -> add
+    -> norm -> ffn -> add.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_kv: int,
+        num_heads: int,
+        ffn_dim: int,
+        dropout: float = 0.0,
+        use_rope: bool = False,
+        use_ada_ln: bool = False,
+        cond_dim: Optional[int] = None,
+        ffn_glu: bool = False,
+        mode: str = "bidirectional",
+    ) -> None:
+        super().__init__()
+        
+        self.use_ada_ln = use_ada_ln
+
+        self.norm1 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
+        self.self_attn = SelfAttention(d_model, num_heads, dropout, use_rope=use_rope, mode=mode)
+
+        # Separate norms for the query and context streams (each at its own dim).
+        self.norm_q = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
+        self.norm_ctx = ConditionalLayerNorm(d_kv, cond_dim, use_ada_ln=use_ada_ln)
+        self.cross_attn = CrossAttention(d_model, d_kv, d_model, num_heads, dropout, use_rope=use_rope)
+
+        self.norm2 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
+        self.ffn = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
+
+    def forward(
+        self,
+        x: torch.Tensor,                                            # (B, T, d_model)
+        context: torch.Tensor,                                      # (B, S, d_kv)
+        padding_mask: Optional[torch.Tensor] = None,                # (B, T) or None
+        context_padding_mask: Optional[torch.Tensor] = None,        # (B, S) or None
+        cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
+    ) -> torch.Tensor:
+        # Norm & self-attention
+        h, g1 = self.norm1(x, cond)                                  # (B, T, d_model), (B, d_model)
+        x = x + g1[:, None, :] * self.self_attn(h, padding_mask)     # (B, T, d_model)
+
+        # Norm & cross-attention
+        q, g2 = self.norm_q(x, cond)                                 # (B, T, d_model), (B, d_model)
+        ctx, _ = self.norm_ctx(context, cond)                        # (B, S, d_kv)
+        x = x + g2[:, None, :] * self.cross_attn(q, ctx, context_padding_mask, padding_mask)
+
+        # Norm & FFN
+        h, g3 = self.norm2(x, cond)                                  # (B, T, d_model), (B, d_model)
+        x = x + g3[:, None, :] * self.ffn(h)                         # (B, T, d_model)
 
         return x                                                     # (B, T, d_model)

@@ -28,12 +28,13 @@ class ConformerBlock(nn.Module):
         cond_dim: Optional[int] = None,
         ffn_glu: bool = False,
         max_seq_len: Optional[int] = None,
+        mode: str = "bidirectional"
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
         self.ffn1 = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
         self.norm_attn = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
-        self.attn = SelfAttention(d_model, num_heads, dropout, use_rope=use_rope, max_seq_len=max_seq_len)
+        self.attn = SelfAttention(d_model, num_heads, dropout, use_rope=use_rope, max_seq_len=max_seq_len, mode=mode)
         self.conv = GatedConv(d_model, kernel_size, use_norm=conv_use_norm, dropout=dropout)
         self.ffn2 = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
         self.norm_out = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
@@ -74,6 +75,7 @@ class Conformer(nn.Module):
         cond_dim: Optional[int] = None,
         ffn_glu: bool = False,
         max_seq_len: Optional[int] = None,
+        mode: str = "bidirectional"
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
@@ -83,6 +85,7 @@ class Conformer(nn.Module):
                 d_model, num_heads, ffn_dim, kernel_size,
                 dropout, use_rope, conv_use_norm,
                 use_ada_ln, cond_dim, ffn_glu, max_seq_len,
+                mode=mode
             )
             for _ in range(num_layers)
         ])
