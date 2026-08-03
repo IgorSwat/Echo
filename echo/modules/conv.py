@@ -13,6 +13,9 @@ class GatedConv(nn.Module):
     """
     Depthwise-separable convolution module with a GLU pointwise expansion,
     as used in the Conformer architecture.
+
+    In causal mode the depthwise conv only looks backwards: output i is built
+    from inputs i-k+1 ... i.
     """
 
     def __init__(
@@ -21,17 +24,25 @@ class GatedConv(nn.Module):
         kernel_size: int,
         use_norm: bool = True,
         dropout: float = 0.0,
+        mode: str = "bidirectional",
     ) -> None:
         super().__init__()
 
         self.use_norm = use_norm
+        self.mode = mode
         if use_norm:
             self.norm = nn.LayerNorm(d_model)
 
         self.pw1 = nn.Linear(d_model, 2 * d_model)                       # pointwise expand
+
+        # Padding is applied by hand rather than by the Conv1d so that both
+        # variants share one module: pad (k-1) frames on the left only for a
+        # backward-looking window, or k//2 on each side for a centered one.
+        # Either way the time length is preserved.
+        self.pad = (kernel_size - 1, 0) if mode == "causal" else (kernel_size // 2, kernel_size // 2)
         self.dw = nn.Conv1d(                                             # depthwise
             d_model, d_model, kernel_size,
-            padding=kernel_size // 2, groups=d_model,
+            groups=d_model,
         )
         self.pw2 = nn.Linear(d_model, d_model)                           # pointwise project
 
@@ -58,7 +69,8 @@ class GatedConv(nn.Module):
 		# As proposed in "Language Modeling with Gated Convolutional Networks",
         # we use GLU as a form of selective channel mixing.
         x = F.glu(self.pw1(x), dim=-1)                                   # (B, T, D)
-        x = self.dw(x.transpose(1, 2)).transpose(1, 2)                   # (B, T, D)
+        x = F.pad(x.transpose(1, 2), self.pad)                           # (B, D, T + k - 1)
+        x = self.dw(x).transpose(1, 2)                                   # (B, T, D)
         x = F.gelu(x)                                                    # (B, T, D)
 
         return self.drop(self.pw2(x))                                    # (B, T, D)
@@ -70,6 +82,9 @@ class ConvNeXtBlock(nn.Module):
     LayerNorm -> 1x1 expand (4C) -> GELU -> 1x1 project (C) -> layer scale ->
     Dropout, with a residual path.
     Uses ConditionalLayerNorm (AdaLN when `use_ada_ln` is set).
+
+    In causal mode the depthwise conv only looks backwards: output i is built
+    from inputs i-k+1 ... i. 
     """
 
     def __init__(
@@ -81,19 +96,26 @@ class ConvNeXtBlock(nn.Module):
         dropout: float = 0.0,
         layer_scale_init: float = 1e-6,
         cond_dim: Optional[int] = None,
+        mode: str = "bidirectional",
     ) -> None:
         super().__init__()
 
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.needs_proj = dim_in != dim_out
+        self.mode = mode
 
         # Depthwise conv (spatial mixing, stays at dim_in).
+        # Padding is applied by hand rather than by the Conv1d so that both
+        # variants share one module: pad (k-1) frames on the left only for a
+        # backward-looking window, or k//2 on each side for a centered one.
+        # Either way the time length is preserved.
+        self.pad = (kernel_size - 1, 0) if mode == "causal" else (kernel_size // 2, kernel_size // 2)
         self.dw = nn.Conv1d(
             dim_in, dim_in, kernel_size,
-            padding=kernel_size // 2, groups=dim_in,
+            groups=dim_in,
         )
-        
+
         # Pointwise channel projection when dims differ.
         if self.needs_proj:
             self.pw_proj = nn.Linear(dim_in, dim_out)
@@ -136,7 +158,8 @@ class ConvNeXtBlock(nn.Module):
         x: torch.Tensor,                                              # (B, T, dim_in)
         cond: Optional[torch.Tensor] = None,                          # (B, cond_dim) or None
     ) -> torch.Tensor:
-        y = self.dw(x.transpose(1, 2)).transpose(1, 2)                # (B, T, dim_in)
+        y = F.pad(x.transpose(1, 2), self.pad)                        # (B, dim_in, T + k - 1)
+        y = self.dw(y).transpose(1, 2)                                # (B, T, dim_in)
         if self.pw_proj is not None:
             y = self.pw_proj(y)                                        # (B, T, dim_out)
         y, gate = self.norm(y, cond)                                  # (B, T, dim_out), (B, dim_out)

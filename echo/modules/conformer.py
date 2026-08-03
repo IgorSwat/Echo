@@ -35,7 +35,7 @@ class ConformerBlock(nn.Module):
         self.ffn1 = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
         self.norm_attn = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.attn = SelfAttention(d_model, num_heads, dropout, use_rope=use_rope, max_seq_len=max_seq_len, mode=mode)
-        self.conv = GatedConv(d_model, kernel_size, use_norm=conv_use_norm, dropout=dropout)
+        self.conv = GatedConv(d_model, kernel_size, use_norm=conv_use_norm, dropout=dropout, mode=mode)
         self.ffn2 = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
         self.norm_out = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
 
