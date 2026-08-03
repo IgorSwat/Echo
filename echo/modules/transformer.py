@@ -8,6 +8,11 @@ import torch
 import torch.nn as nn
 
 
+# ------------------
+# Transformer blocks
+# ------------------
+
+
 class SelfAttentionBlock(nn.Module):
     """Pre-norm transformer block with bidirectional self-attention."""
 
@@ -128,7 +133,7 @@ class HybridAttentionBlock(nn.Module):
         mode: str = "bidirectional",
     ) -> None:
         super().__init__()
-        
+
         self.use_ada_ln = use_ada_ln
 
         self.norm1 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
@@ -162,5 +167,129 @@ class HybridAttentionBlock(nn.Module):
         # Norm & FFN
         h, g3 = self.norm2(x, cond)                                  # (B, T, d_model), (B, d_model)
         x = x + g3[:, None, :] * self.ffn(h)                         # (B, T, d_model)
+
+        return x                                                     # (B, T, d_model)
+
+
+# -------------------
+# Transformer classes
+# -------------------
+
+class _SelfAttentionStack(nn.Module):
+    """
+    Stack of pre-norm SelfAttentionBlocks followed by one final norm.
+
+    Subclasses fix the attention `mode`; everything else is shared.
+    """
+
+    mode: str
+
+    def __init__(
+        self,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        ffn_dim: int,
+        dropout: float = 0.0,
+        use_rope: bool = False,
+        use_ada_ln: bool = False,
+        cond_dim: Optional[int] = None,
+        ffn_glu: bool = False,
+    ) -> None:
+        super().__init__()
+        self.use_ada_ln = use_ada_ln
+
+        self.blocks = nn.ModuleList([
+            SelfAttentionBlock(
+                d_model, num_heads, ffn_dim,
+                dropout, use_rope,
+                use_ada_ln, cond_dim, ffn_glu,
+                mode=self.mode
+            )
+            for _ in range(num_layers)
+        ])
+
+        # One final norm
+        self.norm = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
+
+    def forward(
+        self,
+        x: torch.Tensor,                                            # (B, T, D)
+        key_padding_mask: Optional[torch.Tensor] = None,            # (B, T) or None
+        cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
+    ) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x, key_padding_mask, cond)                     # (B, T, D)
+        x, _ = self.norm(x, cond)                                    # (B, T, D)
+
+        return x                                                     # (B, T, D)
+
+
+class SelfAttentionEncoder(_SelfAttentionStack):
+    """
+    Stack of pre-norm transformer blocks with bidirectional self-attention:
+    every position sees the whole sequence.
+    """
+
+    mode = "bidirectional"
+
+
+class SelfAttentionDecoder(_SelfAttentionStack):
+    """
+    Stack of pre-norm transformer blocks with causal self-attention:
+    every position sees only itself and what came before.
+    """
+
+    mode = "causal"
+
+
+class HybridAttentionDecoder(nn.Module):
+    """
+    Stack of causal HybridAttentionBlocks followed by one final norm.
+
+    Each layer attends over the decoded stream so far (causal self-attention)
+    and over an external context (cross-attention).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_kv: int,
+        num_layers: int,
+        num_heads: int,
+        ffn_dim: int,
+        dropout: float = 0.0,
+        use_rope: bool = False,
+        use_ada_ln: bool = False,
+        cond_dim: Optional[int] = None,
+        ffn_glu: bool = False,
+    ) -> None:
+        super().__init__()
+        self.use_ada_ln = use_ada_ln
+
+        self.blocks = nn.ModuleList([
+            HybridAttentionBlock(
+                d_model, d_kv, num_heads, ffn_dim,
+                dropout, use_rope,
+                use_ada_ln, cond_dim, ffn_glu,
+                mode="causal"
+            )
+            for _ in range(num_layers)
+        ])
+
+        # One final norm
+        self.norm = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
+
+    def forward(
+        self,
+        x: torch.Tensor,                                            # (B, T, d_model)
+        context: torch.Tensor,                                      # (B, S, d_kv)
+        padding_mask: Optional[torch.Tensor] = None,                # (B, T) or None
+        context_padding_mask: Optional[torch.Tensor] = None,        # (B, S) or None
+        cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
+    ) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x, context, padding_mask, context_padding_mask, cond)   # (B, T, d_model)
+        x, _ = self.norm(x, cond)                                    # (B, T, d_model)
 
         return x                                                     # (B, T, d_model)
