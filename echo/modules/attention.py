@@ -137,7 +137,24 @@ class CrossAttention(nn.Module):
     """
     Multi-head cross-attention with rotary position embeddings on BOTH the
     query and key streams.
+
+    `rope_norm` picks how positions are encoded:
+
+    - "query"    — each stream's positions are normalized by its own valid
+                   length, so both land in [0, 1] and the alignment diagonal
+                   adapts to each utterance's true rate. One shared learnable
+                   frequency. Needs the total query length up front, which a
+                   non-autoregressive model has and an autoregressive one does not.
+    - "absolute" — raw indices on both streams, with an independent learnable
+                   frequency each. The attention phase difference vanishes on
+                   `s = (theta_q / theta_k) * i`, so the diagonal's slope is
+                   learned rather than supplied, and nothing depends on a length
+                   that is unknown mid-decode. Because the frequencies are
+                   vectors over rotary dims, different dims can settle on
+                   different slopes.
     """
+
+    ROPE_NORMS = ("query", "absolute")
 
     def __init__(
         self,
@@ -147,14 +164,18 @@ class CrossAttention(nn.Module):
         num_heads: int,
         dropout: float = 0.0,
         use_rope: bool = False,
+        rope_norm: str = "query",
     ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
             raise ValueError(f"d_model ({d_model}) must be divisible by num_heads ({num_heads})")
+        if rope_norm not in self.ROPE_NORMS:
+            raise ValueError(f"rope_norm must be one of {self.ROPE_NORMS}, got {rope_norm!r}")
 
         self.nh = num_heads
         self.hd = d_model // num_heads
         self.use_rope = use_rope
+        self.rope_norm = rope_norm
 
         self.q = nn.Linear(d_query, d_model)
         self.kv = nn.Linear(d_kv, 2 * d_model)
@@ -164,10 +185,15 @@ class CrossAttention(nn.Module):
         self.resid_drop = nn.Dropout(dropout)
 
         # Learnable rotary frequencies (one per head-dim pair). Zero-init =>
-        # identity rotation at the start of training.
+        # identity rotation at the start of training. "absolute" keeps one set
+        # per stream so their ratio, which sets the alignment slope, is learned.
         if use_rope:
             self.rotary_dim = self.hd // 2
-            self.theta = nn.Parameter(torch.zeros(self.rotary_dim))
+            if rope_norm == "absolute":
+                self.theta_q = nn.Parameter(torch.zeros(self.rotary_dim))
+                self.theta_k = nn.Parameter(torch.zeros(self.rotary_dim))
+            else:
+                self.theta = nn.Parameter(torch.zeros(self.rotary_dim))
 
         self._init_weights()
 
@@ -204,6 +230,24 @@ class CrossAttention(nn.Module):
         else:
             lengths = torch.full((batch_size, 1, 1), float(seq_len), device=device)
         ang = (pos / lengths) * self.theta.view(1, 1, -1)         # (B, T, rotary_dim)
+        return ang.sin(), ang.cos()
+
+    @staticmethod
+    def _rope_freqs_absolute(
+        seq_len: int,
+        theta: torch.Tensor,                                    # (rotary_dim,)
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Raw positions times a per-stream learnable theta.
+
+        No length enters, so a position\'s encoding never changes as the
+        sequence grows — the property autoregressive decoding needs. Broadcast
+        over the batch, since every row shares the same index grid.
+        """
+
+        pos = torch.arange(seq_len, device=device, dtype=torch.float32).view(1, seq_len, 1)
+        ang = pos * theta.view(1, 1, -1)                         # (1, T, rotary_dim)
         return ang.sin(), ang.cos()
 
     @staticmethod
@@ -246,8 +290,12 @@ class CrossAttention(nn.Module):
 
         # Dual-stream rotary at length-normalized positions.
         if self.use_rope:
-            sin_q, cos_q = self._rope_freqs(B, T, query_padding_mask, x.device)
-            sin_k, cos_k = self._rope_freqs(B, S, key_padding_mask, x.device)
+            if self.rope_norm == "absolute":
+                sin_q, cos_q = self._rope_freqs_absolute(T, self.theta_q, x.device)
+                sin_k, cos_k = self._rope_freqs_absolute(S, self.theta_k, x.device)
+            else:
+                sin_q, cos_q = self._rope_freqs(B, T, query_padding_mask, x.device)
+                sin_k, cos_k = self._rope_freqs(B, S, key_padding_mask, x.device)
             q = self._apply_rotary_emb(q, sin_q, cos_q)                  # (B, nh, T, hd)
             k = self._apply_rotary_emb(k, sin_k, cos_k)                  # (B, nh, S, hd)
 

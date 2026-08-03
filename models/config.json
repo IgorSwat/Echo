@@ -48,7 +48,8 @@
       "ffn_dim": 2048,
       "ffn_glu": false,
       "dropout": 0.1,
-      "use_rope": true
+      "use_rope": true,
+      "rope_norm": "absolute"
     },
 
     "head": {

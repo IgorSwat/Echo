@@ -128,6 +128,7 @@ class EchoAR(nn.Module):
             dropout=cfg.decoder_dropout,
             use_rope=cfg.decoder_use_rope,
             ffn_glu=cfg.decoder_ffn_glu,
+            rope_norm=cfg.decoder_rope_norm,
         )
 
         # --- Output heads (one per token layer) ---
@@ -195,3 +196,48 @@ class EchoAR(nn.Module):
 
         # One head per token layer, stacked to mirror the input layout.
         return torch.stack([head(h) for head in self.heads], dim=2)  # (B, T, 2, vocab)
+
+    @torch.no_grad()
+    def generate(
+        self,
+        text: torch.Tensor,                                         # (B, S) long
+        text_padding_mask: Optional[torch.Tensor] = None,           # (B, S) or None
+        max_frames: int = 1000,
+    ) -> torch.Tensor:
+        """Greedy autoregressive decoding from text alone.
+        
+        Returns ``(B, T, NUM_TOKEN_LAYERS)`` of codec token ids.
+        """
+        was_training = self.training
+        self.eval()
+
+        B = text.shape[0]
+        ctx = self.encode_text(text, text_padding_mask)              # (B, S, d_text)
+
+        x = torch.full(
+            (B, 1, self.NUM_TOKEN_LAYERS), config.prosody_bos,
+            dtype=torch.long, device=text.device,
+        )
+        finished = torch.zeros(B, dtype=torch.bool, device=text.device)
+
+        for _ in range(max_frames):
+            logits = self(x, context=ctx, text_padding_mask=text_padding_mask)
+            logits = logits[:, -1]                                   # (B, layers, vocab)
+            logits[..., config.prosody_bos] = float("-inf")
+            logits[..., config.prosody_pad] = float("-inf")
+
+            nxt = logits.argmax(dim=-1)                              # (B, layers)
+            finished = finished | (nxt[:, 0] == config.prosody_eos)
+            if bool(finished.all()):
+                break
+
+            # Already-terminated rows contribute padding from here on.
+            nxt = torch.where(
+                finished[:, None], torch.full_like(nxt, config.prosody_pad), nxt
+            )
+            x = torch.cat([x, nxt[:, None, :]], dim=1)               # (B, t + 1, layers)
+
+        if was_training:
+            self.train()
+
+        return x[:, 1:]                                              # (B, T, layers), BOS dropped

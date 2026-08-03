@@ -111,6 +111,10 @@ class ARModelConfig:
     decoder_ffn_glu: bool
     decoder_dropout: float
     decoder_use_rope: bool
+    # How cross-attention encodes positions: "query" (each stream normalized by
+    # its own length, needs the total up front) or "absolute" (raw indices with
+    # a learnable frequency per stream, safe to decode step by step).
+    decoder_rope_norm: str
 
     # Per-token-layer MLP prediction heads
     head_num_layers: int
@@ -143,6 +147,7 @@ class ARModelConfig:
             decoder_ffn_glu=dec["ffn_glu"],
             decoder_dropout=dec["dropout"],
             decoder_use_rope=dec["use_rope"],
+            decoder_rope_norm=dec.get("rope_norm", "query"),
             head_num_layers=hd["num_layers"],
             head_hidden_dim=hd["hidden_dim"],
             head_dropout=hd["dropout"],

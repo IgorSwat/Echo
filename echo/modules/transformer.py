@@ -70,6 +70,7 @@ class CrossAttentionBlock(nn.Module):
         use_ada_ln: bool = False,
         cond_dim: Optional[int] = None,
         ffn_glu: bool = False,
+        rope_norm: str = "query",
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
@@ -78,7 +79,10 @@ class CrossAttentionBlock(nn.Module):
         # Separate norms for the query and context streams (each at its own dim).
         self.norm_q = ConditionalLayerNorm(d_query, cond_dim, use_ada_ln=use_ada_ln)
         self.norm_ctx = ConditionalLayerNorm(d_kv, cond_dim, use_ada_ln=use_ada_ln)
-        self.attn = CrossAttention(d_query, d_kv, d_model, num_heads, dropout, use_rope=use_rope)
+        self.attn = CrossAttention(
+            d_query, d_kv, d_model, num_heads, dropout, use_rope=use_rope,
+            rope_norm=rope_norm,
+        )
         self.norm2 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.ffn = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
 
@@ -131,6 +135,7 @@ class HybridAttentionBlock(nn.Module):
         cond_dim: Optional[int] = None,
         ffn_glu: bool = False,
         mode: str = "bidirectional",
+        rope_norm: str = "query",
     ) -> None:
         super().__init__()
 
@@ -142,7 +147,10 @@ class HybridAttentionBlock(nn.Module):
         # Separate norms for the query and context streams (each at its own dim).
         self.norm_q = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.norm_ctx = ConditionalLayerNorm(d_kv, cond_dim, use_ada_ln=use_ada_ln)
-        self.cross_attn = CrossAttention(d_model, d_kv, d_model, num_heads, dropout, use_rope=use_rope)
+        self.cross_attn = CrossAttention(
+            d_model, d_kv, d_model, num_heads, dropout, use_rope=use_rope,
+            rope_norm=rope_norm,
+        )
 
         self.norm2 = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
         self.ffn = FeedForward(d_model, ffn_dim, dropout, use_glu=ffn_glu)
@@ -263,6 +271,7 @@ class HybridAttentionDecoder(nn.Module):
         use_ada_ln: bool = False,
         cond_dim: Optional[int] = None,
         ffn_glu: bool = False,
+        rope_norm: str = "query",
     ) -> None:
         super().__init__()
         self.use_ada_ln = use_ada_ln
@@ -272,7 +281,8 @@ class HybridAttentionDecoder(nn.Module):
                 d_model, d_kv, num_heads, ffn_dim,
                 dropout, use_rope,
                 use_ada_ln, cond_dim, ffn_glu,
-                mode="causal"
+                mode="causal",
+                rope_norm=rope_norm,
             )
             for _ in range(num_layers)
         ])
