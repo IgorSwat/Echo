@@ -43,6 +43,7 @@ from __style__ import (
 from echo import config
 from echo.ar_model import EchoAR
 from echo.fm_model import EchoFM
+from echo.shortcut_model import EchoShortcut
 
 T_TEXT_VALUES = [32, 64, 128]
 T_AUDIO_VALUES = [200, 400, 600, 800]
@@ -201,6 +202,48 @@ def benchmark_ar(args: argparse.Namespace, device: torch.device) -> None:
     )
 
 
+def benchmark_shortcut(args: argparse.Namespace, device: torch.device) -> None:
+    model = EchoShortcut().to(device)
+    model.eval()
+
+    upsample = 1.0
+    for _, factor in model.stage_specs:
+        upsample *= factor
+
+    print_header("EchoShortcut — Mimi tokens -> Blue latent")
+    print_info("Parameters", f"{sum(p.numel() for p in model.parameters()):,}")
+    print_info("Prosody vocab", f"{config.prosody_vocab_size:,}")
+    print_info("Hidden dim", model.hidden_dim)
+    print_info("Total upsample", f"x{upsample:g}")
+
+    B = args.batch_size
+    V = config.prosody_vocab_size
+    layers = model.NUM_TOKEN_LAYERS
+
+    # --- Full forward pass; the only input is the token stream ---
+    print_section("Latency (ms per forward pass)")
+
+    print(f"  {'T_tokens':>{LABEL_W}}{'L_out':>{COL_W}}{'latency':>{COL_W}}"
+          f"{'frames/s':>{COL_W}}")
+    print("  " + "─" * (LABEL_W + COL_W * 3))
+
+    secs: dict[tuple[int, int], float] = {}
+    for t_tokens in T_TOKEN_VALUES:
+        x = torch.randint(0, V, (B, t_tokens, layers), device=device)
+        with torch.no_grad():
+            l_out = model(x).shape[1]
+
+        s = _time(lambda: model(x), warmup=args.warmup, iters=args.iters, device=device)
+        secs[(t_tokens, 0)] = s
+
+        print(f"  {t_tokens:>{LABEL_W}}{l_out:>{COL_W}}{_fmt_ms(s):>{COL_W}}"
+              f"{B * l_out / s:>{COL_W}.0f}")
+
+    print_separator()
+    print_section(f"Throughput (samples/sec at batch_size={B})")
+    _print_throughput(secs, B)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark Echo inference.")
     parser.add_argument("--warmup", type=int, default=3)
@@ -209,7 +252,7 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto",
                         choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--model", type=str, default="all",
-                        choices=["all", "fm", "ar"],
+                        choices=["all", "fm", "ar", "shortcut"],
                         help="which model to benchmark (default: all)")
     args = parser.parse_args()
 
@@ -235,6 +278,9 @@ def main() -> None:
     if args.model in ("all", "ar"):
         print()
         benchmark_ar(args, device)
+    if args.model in ("all", "shortcut"):
+        print()
+        benchmark_shortcut(args, device)
 
 
 if __name__ == "__main__":

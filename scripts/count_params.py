@@ -41,6 +41,7 @@ from __style__ import (
 from echo import config
 from echo.ar_model import EchoAR
 from echo.fm_model import EchoFM
+from echo.shortcut_model import EchoShortcut
 
 
 def _count_params(module: torch.nn.Module) -> int:
@@ -162,10 +163,56 @@ def report_ar() -> None:
     print_info("Total", _fmt(total), Colors.OKCYAN)
 
 
+def report_shortcut() -> None:
+    model = EchoShortcut()
+    model.eval()
+
+    total = _count_params(model)
+
+    print_header("EchoShortcut — Mimi tokens -> Blue latent")
+
+    # --- Top-level components ---
+    print_section("Top-level components")
+
+    components = [
+        (f"Token embeddings (x{len(model.embed)})", _count_params(model.embed)),
+    ]
+    for i, (blocks, (k, factor)) in enumerate(zip(model.stages, model.stage_specs)):
+        suffix = f", up x{factor:g}" if factor != 1.0 else ""
+        components.append((f"Stage {i} (k={k}{suffix})", _count_params(blocks)))
+    components.append(("Output projection", _count_params(model.out_proj)))
+
+    _print_components(components, total)
+
+    print_separator()
+    print_info("Total", _fmt(total), Colors.OKCYAN)
+
+    # --- Dimensions ---
+    print_section("Dimensions")
+    print_info("Token layers", model.NUM_TOKEN_LAYERS)
+    print_info("Prosody vocab", _fmt(model.vocab_size))
+    print_info("Embedding dim", f"{model.emb_dim} (x{model.NUM_TOKEN_LAYERS} -> "
+                                f"{model.hidden_dim})")
+    print_info("Output dim", model.d_out)
+    print_info("Blocks per stage", config.shortcut_model.blocks_per_stage)
+
+    upsample = 1.0
+    for _, factor in model.stage_specs:
+        upsample *= factor
+    print_info("Total upsample", f"x{upsample:g}")
+
+    # --- Per-block breakdown ---
+    flat = torch.nn.ModuleList([b for blocks in model.stages for b in blocks])
+    _print_blocks(flat, total, "ConvNeXt blocks")
+
+    print_separator()
+    print_info("Total", _fmt(total), Colors.OKCYAN)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Echo parameter breakdown.")
     parser.add_argument("--model", type=str, default="all",
-                        choices=["all", "fm", "ar"],
+                        choices=["all", "fm", "ar", "shortcut"],
                         help="which model to report on (default: all)")
     args = parser.parse_args()
 
@@ -177,6 +224,10 @@ def main() -> None:
         if args.model == "all":
             print()
         report_ar()
+    if args.model in ("all", "shortcut"):
+        if args.model == "all":
+            print()
+        report_shortcut()
 
 
 if __name__ == "__main__":

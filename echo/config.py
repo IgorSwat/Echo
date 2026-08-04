@@ -32,6 +32,7 @@ class TrainingSections:
 
     fm: TrainingConfig
     ar: TrainingConfig
+    shortcut: TrainingConfig
 
     # Factory method
     @classmethod
@@ -39,6 +40,7 @@ class TrainingSections:
         return cls(
             fm=TrainingConfig(**d["fm"]),
             ar=TrainingConfig(**d["ar"]),
+            shortcut=TrainingConfig(**d["shortcut"]),
         )
 
 
@@ -155,6 +157,32 @@ class ARModelConfig:
 
 
 @dataclass
+class ShortcutModelConfig:
+    # Per-token-layer embedding width; the trunk runs at 2*emb_dim.
+    emb_dim: int
+    d_out: int
+    dropout: float
+
+    # ConvNeXt blocks per stage.
+    blocks_per_stage: int
+
+    # One entry per stage: (kernel_size, upsampling factor applied *after*
+    # that stage's blocks; 1.0 means no interpolation).
+    stages: list[tuple[int, float]]
+
+    # Factory method
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ShortcutModelConfig:
+        return cls(
+            emb_dim=d["emb_dim"],
+            d_out=d["d_out"],
+            dropout=d["dropout"],
+            blocks_per_stage=d["blocks_per_stage"],
+            stages=[(s["kernel_size"], float(s["upsample"])) for s in d["stages"]],
+        )
+
+
+@dataclass
 class EchoConfig:
     # Constants shared by every model
     latent_dim: int
@@ -177,6 +205,9 @@ class EchoConfig:
     # Autoregressive prosody model (EchoAR)
     ar_model: ARModelConfig
 
+    # Mimi tokens -> Blue latent shortcut model (EchoShortcut)
+    shortcut_model: ShortcutModelConfig
+
     # Training hyperparameters, per model
     training: TrainingSections
 
@@ -198,6 +229,7 @@ class EchoConfig:
             prosody_eos=d["special_tokens"]["prosody_eos"],
             fm_model=FMModelConfig.from_dict(d["fm_model"]),
             ar_model=ARModelConfig.from_dict(d["ar_model"]),
+            shortcut_model=ShortcutModelConfig.from_dict(d["shortcut_model"]),
             training=TrainingSections.from_dict(d["training"]),
         )
 
