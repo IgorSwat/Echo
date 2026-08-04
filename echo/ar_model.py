@@ -1,10 +1,10 @@
 from echo import config
 
-from echo.modules.conv import GatedConv
 from echo.modules.text_encoder import TextEncoder
 from echo.modules.transformer import HybridAttentionDecoder
+from echo.modules.types import HybridKVCache
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -57,10 +57,9 @@ class EchoAR(nn.Module):
       1. Embed both token layers with separate tables and concatenate
          -> (B, T, 2*emb_dim).
       2. Encode text -> (B, S, d_text) cross-attention context.
-      3. Causal GatedConv stack over the token embeddings (residual per layer).
-      4. Project to hidden_dim (when needed) and run the causal
+      3. Project to hidden_dim (when needed) and run the causal
          HybridAttentionDecoder against the text context -> H (B, T, hidden_dim).
-      5. One MLP head per token layer maps H to logits -> (B, T, 2, vocab).
+      4. One MLP head per token layer maps H to logits -> (B, T, 2, vocab).
 
     Everything on the token stream is causal, so position i is built from
     positions <= i only and the whole model can be trained with teacher forcing
@@ -103,17 +102,6 @@ class EchoAR(nn.Module):
             conv_use_norm=cfg.text_encoder_conv_use_norm,
             max_seq_len=config.text_len_limit,
         )
-
-        # --- Convolutional front-end over the token embeddings ---
-        self.convs = nn.ModuleList([
-            GatedConv(
-                d_tokens, cfg.conv_kernel_size,
-                use_norm=cfg.conv_use_norm,
-                dropout=cfg.conv_dropout,
-                mode="causal",
-            )
-            for _ in range(cfg.conv_num_layers)
-        ])
 
         # --- Main decoder stack ---
         # Widen the token stream to the decoder dim when the two differ.
@@ -168,13 +156,25 @@ class EchoAR(nn.Module):
         padding_mask: Optional[torch.Tensor] = None,                # (B, T) or None
         text_padding_mask: Optional[torch.Tensor] = None,           # (B, S) or None
         context: Optional[torch.Tensor] = None,                     # (B, S, d_text) or None
-    ) -> torch.Tensor:
+        kv_cache: Optional[HybridKVCache] = None,                   # decoder caches, per block
+        start_pos: int = 0,                                         # frames already decoded
+        return_cache: bool = False,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, HybridKVCache]]:
+        """
+        Logits for every frame in `x`; with `return_cache`, the decoder caches too.
+        """
         if x.shape[-1] != self.NUM_TOKEN_LAYERS:
             raise ValueError(
                 f"expected {self.NUM_TOKEN_LAYERS} token layers, got {x.shape[-1]}"
             )
         if context is None and text is None:
             raise ValueError("provide either `text` or a precomputed `context`")
+
+        # Nothing between the embeddings and the decoder mixes across time, so
+        # mid-decode the frames already covered by the caches can be dropped up
+        # front: only the new ones need embedding at all.
+        if start_pos > 0:
+            x = x[:, start_pos:]                                     # (B, T_new, 2)
 
         # Each token layer gets its own table; the two embeddings are concatenated
         # along the feature dim rather than summed, so the decoder can tell them apart.
@@ -185,17 +185,18 @@ class EchoAR(nn.Module):
         # Text conditioning (bidirectional; the text is fully known up front).
         ctx = context if context is not None else self.encode_text(text, text_padding_mask)
 
-        # Convolutional front-end, residual per layer as in ConformerBlock.
-        for conv in self.convs:
-            h = h + conv(h)                                          # (B, T, 2*emb_dim)
-
         if self.in_proj is not None:
             h = self.in_proj(h)                                      # (B, T, hidden_dim)
 
-        h = self.decoder(h, ctx, padding_mask, text_padding_mask)    # (B, T, hidden_dim)
+        h, caches = self.decoder(
+            h, ctx, padding_mask, text_padding_mask,
+            kv_cache=kv_cache, start_pos=start_pos,
+        )                                                            # (B, T_new, hidden_dim)
 
         # One head per token layer, stacked to mirror the input layout.
-        return torch.stack([head(h) for head in self.heads], dim=2)  # (B, T, 2, vocab)
+        logits = torch.stack([head(h) for head in self.heads], dim=2)  # (B, T, 2, vocab)
+
+        return (logits, caches) if return_cache else logits
 
     @torch.no_grad()
     def generate(
@@ -203,6 +204,7 @@ class EchoAR(nn.Module):
         text: torch.Tensor,                                         # (B, S) long
         text_padding_mask: Optional[torch.Tensor] = None,           # (B, S) or None
         max_frames: int = 1000,
+        use_cache: bool = True,
     ) -> torch.Tensor:
         """Greedy autoregressive decoding from text alone.
         
@@ -220,8 +222,16 @@ class EchoAR(nn.Module):
         )
         finished = torch.zeros(B, dtype=torch.bool, device=text.device)
 
+        caches: Optional[HybridKVCache] = None
         for _ in range(max_frames):
-            logits = self(x, context=ctx, text_padding_mask=text_padding_mask)
+            # Everything before the newest frame is already in the caches, so the
+            # decoder only has to run on what was appended since the last step.
+            start_pos = x.shape[1] - 1 if caches is not None else 0
+            out = self(
+                x, context=ctx, text_padding_mask=text_padding_mask,
+                kv_cache=caches, start_pos=start_pos, return_cache=use_cache,
+            )
+            logits, caches = out if use_cache else (out, None)
             logits = logits[:, -1]                                   # (B, layers, vocab)
             logits[..., config.prosody_bos] = float("-inf")
             logits[..., config.prosody_pad] = float("-inf")

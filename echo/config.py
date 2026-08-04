@@ -100,12 +100,6 @@ class ARModelConfig:
     text_encoder_use_rope: bool
     text_encoder_conv_use_norm: bool
 
-    # Causal convolutional front-end over the token embeddings
-    conv_num_layers: int
-    conv_kernel_size: int
-    conv_dropout: float
-    conv_use_norm: bool
-
     # Causal hybrid (self- + cross-attention) decoder
     decoder_num_layers: int
     decoder_num_heads: int
@@ -126,7 +120,7 @@ class ARModelConfig:
     # Factory method
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ARModelConfig:
-        te, cv, dec, hd = d["text_encoder"], d["conv"], d["decoder"], d["head"]
+        te, dec, hd = d["text_encoder"], d["decoder"], d["head"]
         return cls(
             emb_dim=d["emb_dim"],
             hidden_dim=d["hidden_dim"],
@@ -139,10 +133,6 @@ class ARModelConfig:
             text_encoder_dropout=te["dropout"],
             text_encoder_use_rope=te["use_rope"],
             text_encoder_conv_use_norm=te["conv_use_norm"],
-            conv_num_layers=cv["num_layers"],
-            conv_kernel_size=cv["kernel_size"],
-            conv_dropout=cv["dropout"],
-            conv_use_norm=cv["use_norm"],
             decoder_num_layers=dec["num_layers"],
             decoder_num_heads=dec["num_heads"],
             decoder_ffn_dim=dec["ffn_dim"],

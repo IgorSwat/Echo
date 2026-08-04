@@ -165,9 +165,9 @@ class EchoFM(nn.Module):
 
         for block in self.blocks:
             if isinstance(block, CrossAttentionBlock):
-                x = block(x, text_enc, text_key_padding_mask, cond, mask)  # (B, T', d')
+                x, _ = block(x, text_enc, text_key_padding_mask, cond, mask)  # (B, T', d')
             elif isinstance(block, SelfAttentionBlock):
-                x = block(x, mask, cond)                               # (B, T', d')
+                x, _ = block(x, mask, cond)                            # (B, T', d')
             elif isinstance(block, Downsample1D):
                 skips.append(x)                                        # stash encoder feature
                 x = block(x)                                            # (B, T//2, 2C)

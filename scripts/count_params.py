@@ -3,8 +3,7 @@
 
 For EchoFM, reports parameter counts for the TimeEncoder, TextEncoder, and each
 block in the main processing stack, grouped by block type. For EchoAR, reports
-the token embeddings, TextEncoder, causal conv front-end, decoder blocks and
-the per-token-layer heads.
+the token embeddings, TextEncoder, decoder blocks and the per-token-layer heads.
 
 Usage:
     python scripts/count_params.py
@@ -135,7 +134,6 @@ def report_ar() -> None:
     components = [
         (f"Token embeddings (x{len(model.embed)})", _count_params(model.embed)),
         ("TextEncoder", _count_params(model.text_encoder)),
-        (f"Causal convs (x{len(model.convs)})", _count_params(model.convs)),
         ("Decoder", _count_params(model.decoder)),
         (f"Heads (x{len(model.heads)})", _count_params(model.heads)),
     ]

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 
-# Per-layer key/value cache for the transformer decoder.  One (k, v) tuple per
-# block, both tensors of shape ``(B, num_heads, seq_len, head_dim)``.  ``None``
-# entries signal an empty cache (used when the cache is first created or when a
-# layer has not yet been populated).
-KVCache = list[tuple[torch.Tensor, torch.Tensor] | None]
+
+# --- Attention key/value caches ---
+LayerCache = tuple[torch.Tensor, torch.Tensor]
+HybridLayerCache = tuple[LayerCache, LayerCache]  # Seperate for queries (growing) and keys (fixed)
+
+# What a whole stack hands back: one entry per block, in block order.
+KVCache = list[LayerCache]
+HybridKVCache = list[HybridLayerCache]

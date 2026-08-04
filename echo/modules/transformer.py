@@ -1,6 +1,7 @@
 from echo.modules.attention import SelfAttention, CrossAttention
 from echo.modules.ffn import FeedForward
 from echo.modules.norm import ConditionalLayerNorm
+from echo.modules.types import HybridKVCache, HybridLayerCache, KVCache, LayerCache
 
 from typing import Optional
 
@@ -38,15 +39,18 @@ class SelfAttentionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, D)
-        key_padding_mask: Optional[torch.Tensor] = None,            # (B, T) or None
+        key_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
-    ) -> torch.Tensor:
+        kv_cache: Optional[LayerCache] = None,                        # keys/values so far
+        start_pos: int = 0,                                         # positions already cached
+    ) -> tuple[torch.Tensor, LayerCache]:
         h, g1 = self.norm1(x, cond)                                 # (B, T, D), (B, D)
-        x = x + g1[:, None, :] * self.attn(h, key_padding_mask)    # (B, T, D)
+        attn, cache = self.attn(h, key_padding_mask, kv_cache, start_pos)
+        x = x + g1[:, None, :] * attn                                # (B, T, D)
         h, g2 = self.norm2(x, cond)                                 # (B, T, D), (B, D)
         x = x + g2[:, None, :] * self.ffn(h)                        # (B, T, D)
 
-        return x                                                     # (B, T, D)
+        return x, cache                                              # (B, T, D), cache
 
 
 class CrossAttentionBlock(nn.Module):
@@ -94,14 +98,20 @@ class CrossAttentionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, d_query)
-        context: torch.Tensor,                                      # (B, S, d_kv)
+        context: Optional[torch.Tensor],                            # (B, S, d_kv), None if cached
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
         query_padding_mask: Optional[torch.Tensor] = None,          # (B, T) or None
-    ) -> torch.Tensor:
+        kv_cache: Optional[LayerCache] = None,                        # context keys/values
+        start_pos: int = 0,                                         # query positions consumed
+    ) -> tuple[torch.Tensor, LayerCache]:
         q, g1 = self.norm_q(x, cond)                                 # (B, T, d_query), (B, d_query)
-        ctx, _ = self.norm_ctx(context, cond)                        # (B, S, d_kv)
-        delta = self.attn(q, ctx, key_padding_mask, query_padding_mask)
+        # Normalizing the context is part of building its keys/values, so it is
+        # skipped along with them once the cache exists.
+        ctx = None if kv_cache is not None else self.norm_ctx(context, cond)[0]
+        delta, cache = self.attn(
+            q, ctx, key_padding_mask, query_padding_mask, kv_cache, start_pos
+        )
         if not self.needs_proj:
             delta = g1[:, None, :] * delta
 
@@ -111,7 +121,7 @@ class CrossAttentionBlock(nn.Module):
         h, g2 = self.norm2(x, cond)                                  # (B, T, d_model), (B, d_model)
         x = x + g2[:, None, :] * self.ffn(h)                         # (B, T, d_model)
 
-        return x                                                     # (B, T, d_model)
+        return x, cache                                              # (B, T, d_model), cache
 
 
 class HybridAttentionBlock(nn.Module):
@@ -158,25 +168,33 @@ class HybridAttentionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, d_model)
-        context: torch.Tensor,                                      # (B, S, d_kv)
-        padding_mask: Optional[torch.Tensor] = None,                # (B, T) or None
+        context: Optional[torch.Tensor],                            # (B, S, d_kv), None if cached
+        padding_mask: Optional[torch.Tensor] = None,                # (B, S_self) or None
         context_padding_mask: Optional[torch.Tensor] = None,        # (B, S) or None
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
-    ) -> torch.Tensor:
+        kv_cache: Optional[HybridLayerCache] = None,                # (self cache, cross cache)
+        start_pos: int = 0,                                         # positions already decoded
+    ) -> tuple[torch.Tensor, HybridLayerCache]:
+        self_cache, cross_cache = kv_cache if kv_cache is not None else (None, None)
+
         # Norm & self-attention
         h, g1 = self.norm1(x, cond)                                  # (B, T, d_model), (B, d_model)
-        x = x + g1[:, None, :] * self.self_attn(h, padding_mask)     # (B, T, d_model)
+        attn, self_cache = self.self_attn(h, padding_mask, self_cache, start_pos)
+        x = x + g1[:, None, :] * attn                                # (B, T, d_model)
 
         # Norm & cross-attention
         q, g2 = self.norm_q(x, cond)                                 # (B, T, d_model), (B, d_model)
-        ctx, _ = self.norm_ctx(context, cond)                        # (B, S, d_kv)
-        x = x + g2[:, None, :] * self.cross_attn(q, ctx, context_padding_mask, padding_mask)
+        ctx = None if cross_cache is not None else self.norm_ctx(context, cond)[0]
+        attn, cross_cache = self.cross_attn(
+            q, ctx, context_padding_mask, padding_mask, cross_cache, start_pos
+        )
+        x = x + g2[:, None, :] * attn                                # (B, T, d_model)
 
         # Norm & FFN
         h, g3 = self.norm2(x, cond)                                  # (B, T, d_model), (B, d_model)
         x = x + g3[:, None, :] * self.ffn(h)                         # (B, T, d_model)
 
-        return x                                                     # (B, T, d_model)
+        return x, (self_cache, cross_cache)
 
 
 # -------------------
@@ -223,14 +241,21 @@ class _SelfAttentionStack(nn.Module):
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, D)
-        key_padding_mask: Optional[torch.Tensor] = None,            # (B, T) or None
+        key_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
-    ) -> torch.Tensor:
-        for block in self.blocks:
-            x = block(x, key_padding_mask, cond)                     # (B, T, D)
+        kv_cache: Optional[KVCache] = None,                         # one entry per block
+        start_pos: int = 0,                                         # positions already cached
+    ) -> tuple[torch.Tensor, KVCache]:
+        caches: KVCache = []
+        for i, block in enumerate(self.blocks):
+            x, cache = block(
+                x, key_padding_mask, cond,
+                None if kv_cache is None else kv_cache[i], start_pos,
+            )                                                        # (B, T, D)
+            caches.append(cache)
         x, _ = self.norm(x, cond)                                    # (B, T, D)
 
-        return x                                                     # (B, T, D)
+        return x, caches                                             # (B, T, D), per-block caches
 
 
 class SelfAttentionEncoder(_SelfAttentionStack):
@@ -293,13 +318,20 @@ class HybridAttentionDecoder(nn.Module):
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, d_model)
-        context: torch.Tensor,                                      # (B, S, d_kv)
-        padding_mask: Optional[torch.Tensor] = None,                # (B, T) or None
+        context: Optional[torch.Tensor],                            # (B, S, d_kv), None if cached
+        padding_mask: Optional[torch.Tensor] = None,                # (B, S_self) or None
         context_padding_mask: Optional[torch.Tensor] = None,        # (B, S) or None
         cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
-    ) -> torch.Tensor:
-        for block in self.blocks:
-            x = block(x, context, padding_mask, context_padding_mask, cond)   # (B, T, d_model)
+        kv_cache: Optional[HybridKVCache] = None,                   # one entry per block
+        start_pos: int = 0,                                         # positions already decoded
+    ) -> tuple[torch.Tensor, HybridKVCache]:
+        caches: HybridKVCache = []
+        for i, block in enumerate(self.blocks):
+            x, cache = block(
+                x, context, padding_mask, context_padding_mask, cond,
+                None if kv_cache is None else kv_cache[i], start_pos,
+            )                                                        # (B, T, d_model)
+            caches.append(cache)
         x, _ = self.norm(x, cond)                                    # (B, T, d_model)
 
-        return x                                                     # (B, T, d_model)
+        return x, caches                                             # (B, T, d_model), caches
