@@ -127,5 +127,6 @@ data/**/*.npz
 # Model files
 models/*.pt
 models/*.pth
+checkpoints/*.pt
 
 # Misc
