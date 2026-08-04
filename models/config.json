@@ -62,8 +62,8 @@
   "shortcut_model": {
     "emb_dim": 256,
     "d_out": 24,
-    "dropout": 0.0,
-    "blocks_per_stage": 2,
+    "dropout": 0.1,
+    "blocks_per_stage": 3,
 
     "stages": [
       {"kernel_size": 5, "upsample": 2.0},

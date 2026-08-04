@@ -10,6 +10,11 @@ with the distil side synthesised instead of read from disk.
     text -> EchoAR -> Mimi.decode -> resample -> BlueCodec.encode
          -> EchoFM (ODE) -> BlueCodec.decode -> audio
 
+With ``--shortcut-model`` the middle stage is replaced by EchoShortcut, which
+maps the token grid straight to a distil latent and skips both codecs:
+
+    text -> EchoAR -> EchoShortcut -> EchoFM (ODE) -> BlueCodec.decode -> audio
+
 The AR stage decides the duration (it stops when it emits EOS), so nothing about
 the length needs to be supplied.
 
@@ -17,6 +22,11 @@ Usage:
     python scripts/run_full.py --ar-model checkpoints/echo_ar_best.pt \\
         --fm-model checkpoints/echo_final.pt --text "həlˈOʊ wˈɜːld" \\
         --steps 8 --cfg 3.0 --output out.wav
+
+    python scripts/run_full.py --ar-model checkpoints/echo_ar_best.pt \\
+        --fm-model checkpoints/echo_final.pt \\
+        --shortcut-model checkpoints/echo_shortcut_best.pt \\
+        --text "həlˈOʊ wˈɜːld" --output out.wav
 """
 
 from __future__ import annotations
@@ -46,6 +56,7 @@ from __style__ import Colors, print_header, print_info, print_section, print_sep
 from echo import config
 from echo.ar_model import EchoAR
 from echo.fm_model import EchoFM
+from echo.shortcut_model import EchoShortcut
 from echo.tokenizer import Tokenizer
 
 # Reuse the samplers rather than restate them: the flow-matching integrator and
@@ -107,6 +118,16 @@ def main() -> None:
                         help="Path to an EchoAR checkpoint (.pt).")
     parser.add_argument("--fm-model", type=str, required=True,
                         help="Path to an EchoFM checkpoint (.pt).")
+    parser.add_argument("--shortcut-model", type=str, default=None,
+                        help="Path to an EchoShortcut checkpoint (.pt). When given, the "
+                             "Mimi-decode/BlueCodec-encode stage is replaced by the shortcut "
+                             "model, which maps the token grid straight to a distil latent.")
+    parser.add_argument("--shortcut-trim-ratio", type=float, default=6.75, metavar="R",
+                        help="Shortcut mode only: keep floor(R * T_tokens) latent frames "
+                             "(default: 6.75). The model's fixed 6.88 upsample overshoots the "
+                             "true latent length on about half the corpus, and any frame past "
+                             "the end makes BlueCodec ring loudly, so the tail is trimmed. "
+                             "Pass 6.88 to disable.")
     parser.add_argument("--text", type=str, required=True,
                         help="Phoneme string to synthesize.")
     parser.add_argument("--max-frames", type=int, default=1000,
@@ -133,6 +154,10 @@ def main() -> None:
 
     if args.cut_last < 0:
         parser.error("--cut_last must be >= 0")
+    if args.shortcut_trim_ratio <= 0:
+        parser.error("--shortcut-trim-ratio must be > 0")
+
+    use_shortcut = args.shortcut_model is not None
 
     device = _select_device()
     output_path = Path(args.output)
@@ -151,7 +176,17 @@ def main() -> None:
     _load_checkpoint(fm_model, args.fm_model, device, "EchoFM")
     fm_model.eval()
 
-    mimi = MimiModel.from_pretrained("kyutai/mimi").to(device).eval()
+    shortcut_model = None
+    if use_shortcut:
+        shortcut_model = EchoShortcut().to(device)
+        _load_checkpoint(shortcut_model, args.shortcut_model, device, "EchoShortcut")
+        shortcut_model.eval()
+
+    # In shortcut mode Mimi is only needed to render the intermediate AR preview,
+    # so loading it is skipped unless it is actually going to be used.
+    mimi = None
+    if not use_shortcut or args.save_intermediate:
+        mimi = MimiModel.from_pretrained("kyutai/mimi").to(device).eval()
     blue = BlueCodec.from_pretrained("notmax123/blue-codec", device=str(device))
 
     tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")
@@ -165,6 +200,12 @@ def main() -> None:
     print_info("Device", str(device), Colors.OKCYAN)
     print_info("AR checkpoint", args.ar_model)
     print_info("FM checkpoint", args.fm_model)
+    if use_shortcut:
+        print_info("Shortcut checkpoint", args.shortcut_model, Colors.OKCYAN)
+        print_info("Middle stage", "EchoShortcut (Mimi + BlueCodec encode skipped)",
+                   Colors.OKCYAN)
+    else:
+        print_info("Middle stage", "Mimi decode -> BlueCodec encode")
     print_info("Text tokens", str(text_ids.shape[1]))
     print_info("Steps", str(args.steps))
     print_info("Solver", args.solver)
@@ -191,26 +232,49 @@ def main() -> None:
     print_info("Duration", f"{duration:.2f}s")
     print_info("Time", f"{timings['ar']:.3f}s  ({1000 * timings['ar'] / frames:.1f} ms/frame)")
 
-    # --- Stage 2: tokens -> coarse audio -> distil latent --------------------
-    print_section("Stage 2 — Mimi decode -> BlueCodec encode")
-    with _timed("codec", device, timings):
-        with torch.no_grad():
-            audio_mimi = _decode_codes(mimi, codes.transpose(1, 2))    # (1, T_audio) @ 24 kHz
-            audio_blue = torchaudio.functional.resample(audio_mimi, _MIMI_SR, _BLUE_SR)
-            distil = blue.encode(audio_blue)                           # (1, C, T_lat)
+    # --- Stage 2: tokens -> distil latent ------------------------------------
+    audio_mimi = None
+    if use_shortcut:
+        print_section("Stage 2 — EchoShortcut")
+        with _timed("codec", device, timings):
+            with torch.no_grad():
+                distil = shortcut_model(codes)                         # (1, T_lat, C)
+
+        # The shortcut's fixed upsample overruns the length BlueCodec's encoder
+        # would have produced, and the frames past that end are both unsupervised
+        # and enough to make the decoder ring. Trimming costs a few ms of tail
+        # that only ever held a codec edge artifact.
+        keep = min(distil.shape[1], int(frames * args.shortcut_trim_ratio))
+        if keep < distil.shape[1]:
+            print_info("Tail trim", f"{distil.shape[1]} -> {keep} frames "
+                                    f"(ratio {args.shortcut_trim_ratio:g})", Colors.OKCYAN)
+            distil = distil[:, :keep]
+
+        # The model is trained against channel-normalized targets, so its output
+        # is already in the space EchoFM expects — no normalization step here.
+    else:
+        print_section("Stage 2 — Mimi decode -> BlueCodec encode")
+        with _timed("codec", device, timings):
+            with torch.no_grad():
+                audio_mimi = _decode_codes(mimi, codes.transpose(1, 2))  # (1, T_audio) @ 24 kHz
+                audio_blue = torchaudio.functional.resample(audio_mimi, _MIMI_SR, _BLUE_SR)
+                distil = blue.encode(audio_blue)                       # (1, C, T_lat)
+
+        distil = distil.transpose(1, 2).float()                        # (1, T_lat, C)
+        if stats is not None:
+            mean, std = stats
+            distil = (distil - mean) / std
 
     if args.save_intermediate:
+        if audio_mimi is None:                                         # shortcut mode
+            with torch.no_grad():
+                audio_mimi = _decode_codes(mimi, codes.transpose(1, 2))
         inter = output_path.with_name(output_path.stem + "_ar" + output_path.suffix)
         torchaudio.save(str(inter), audio_mimi.float().cpu(), _MIMI_SR)
         print_info("Intermediate", str(inter), Colors.OKCYAN)
 
-    distil = distil.transpose(1, 2).float()                            # (1, T_lat, C)
     print_info("Distil latent", f"{tuple(distil.shape)}  ({distil.shape[1] / (_BLUE_SR / _BLUE_HOP):.2f}s)")
     print_info("Time", f"{timings['codec']:.3f}s")
-
-    if stats is not None:
-        mean, std = stats
-        distil = (distil - mean) / std
 
     # --- Stage 3: distil latent -> data latent -> audio ----------------------
     print_section("Stage 3 — EchoFM")
@@ -247,7 +311,8 @@ def main() -> None:
     print_section("Inference time")
     rows = [
         (f"EchoAR ({frames} frames)", timings["ar"]),
-        ("Mimi + BlueCodec (codec -> latent)", timings["codec"]),
+        ("EchoShortcut (tokens -> latent)" if use_shortcut
+         else "Mimi + BlueCodec (codec -> latent)", timings["codec"]),
         (f"EchoFM ({args.steps} {args.solver} steps)", timings["fm"]),
         ("BlueCodec decode (latent -> audio)", timings["decode"]),
     ]
