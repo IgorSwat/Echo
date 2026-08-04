@@ -69,6 +69,9 @@ class EchoAR(nn.Module):
     # Number of stacked prosody token layers (x[..., 0] and x[..., 1]).
     NUM_TOKEN_LAYERS = 2
 
+    # How many decoding steps to run between two EOS checks.
+    EOS_CHECK_EVERY = 6
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -205,11 +208,16 @@ class EchoAR(nn.Module):
         text_padding_mask: Optional[torch.Tensor] = None,           # (B, S) or None
         max_frames: int = 1000,
         use_cache: bool = True,
+        eos_check_every: Optional[int] = None,
     ) -> torch.Tensor:
         """Greedy autoregressive decoding from text alone.
-        
+
         Returns ``(B, T, NUM_TOKEN_LAYERS)`` of codec token ids.
         """
+        eos_check_every = self.EOS_CHECK_EVERY if eos_check_every is None else eos_check_every
+        if eos_check_every < 1:
+            raise ValueError(f"eos_check_every must be >= 1, got {eos_check_every}")
+
         was_training = self.training
         self.eval()
 
@@ -221,9 +229,12 @@ class EchoAR(nn.Module):
             dtype=torch.long, device=text.device,
         )
         finished = torch.zeros(B, dtype=torch.bool, device=text.device)
+        # Real (pre-EOS) frames per row, tracked on-device so that counting it
+        # costs no synchronization; only the final trim reads it back.
+        lengths = torch.zeros(B, dtype=torch.long, device=text.device)
 
         caches: Optional[HybridKVCache] = None
-        for _ in range(max_frames):
+        for step in range(max_frames):
             # Everything before the newest frame is already in the caches, so the
             # decoder only has to run on what was appended since the last step.
             start_pos = x.shape[1] - 1 if caches is not None else 0
@@ -238,16 +249,23 @@ class EchoAR(nn.Module):
 
             nxt = logits.argmax(dim=-1)                              # (B, layers)
             finished = finished | (nxt[:, 0] == config.prosody_eos)
-            if bool(finished.all()):
-                break
+            lengths += (~finished).long()                            # (B,)
 
-            # Already-terminated rows contribute padding from here on.
+            # Already-terminated rows contribute padding from here on, so every
+            # frame decoded past EOS is pad and drops out in the trim.
             nxt = torch.where(
                 finished[:, None], torch.full_like(nxt, config.prosody_pad), nxt
             )
             x = torch.cat([x, nxt[:, None, :]], dim=1)               # (B, t + 1, layers)
 
+            if (step + 1) % eos_check_every == 0 and bool(finished.all()):
+                break
+
         if was_training:
             self.train()
 
-        return x[:, 1:]                                              # (B, T, layers), BOS dropped
+        # One synchronization for the whole decode: the longest row decides how
+        # much of the padded tail survives.
+        keep = int(lengths.max())
+
+        return x[:, 1:1 + keep]                                      # (B, T, layers), BOS dropped
