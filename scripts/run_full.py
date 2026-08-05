@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -156,6 +157,11 @@ def main() -> None:
         parser.error("--cut_last must be >= 0")
     if args.shortcut_trim_ratio <= 0:
         parser.error("--shortcut-trim-ratio must be > 0")
+
+    # BlueCodec's STFT reuses an `out` tensor that torch resizes on the first
+    # call; the deprecation notice is internal to the codec and says nothing
+    # about this script's inputs.
+    warnings.filterwarnings("ignore", message=".*An output with one or more elements was resized.*")
 
     use_shortcut = args.shortcut_model is not None
 
