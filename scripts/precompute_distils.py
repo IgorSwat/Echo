@@ -3,12 +3,17 @@
 
 Pipeline: audio -> Mimi codec (first --layers layers) -> decoded audio -> BlueCodec latents.
 
+With ``--codec-dir`` the Mimi encode step is skipped: the codecs are read from
+``.npz`` files (a ``codes`` array of shape ``(layers, T_codec)``, as written by
+``precompute_codecs.py``) and the pipeline starts at the truncate step.
+
 Output files are ``.npz`` (zlib compressed) containing a single ``latents`` array
 of shape ``(num_channels, T_latent)`` of float32 values.
 
 Usage:
     python scripts/precompute_distils.py --audio-dir data/audio --output-dir data/distils
-    python scripts/precompute_distils.py --audio-dir data/audio --output-dir data/distils --layers 4 --batch-size 4
+    python scripts/precompute_distils.py --audio-dir data/audio --output-dir data/distils --layers 4
+    python scripts/precompute_distils.py --codec-dir data/kanclerz/codecs --output-dir data/kanclerz/distils
 """
 
 from __future__ import annotations
@@ -51,6 +56,8 @@ from __style__ import (  # noqa: E402
 _AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aiff", ".aif"}
 
 _MIMI_SR = 24000
+# Mimi's 12.5 Hz token grid over 24 kHz audio: 1920 samples per codec frame.
+_MIMI_FRAME = 1920
 _BLUE_SR = 44100
 _NUM_CHANNELS = 24
 
@@ -72,10 +79,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Precompute distillation latents: Mimi → truncate → decode → BlueCodec."
     )
-    parser.add_argument("--audio-dir", type=str, required=True, help="Directory containing input audio files.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--audio-dir", type=str, help="Directory containing input audio files.")
+    source.add_argument("--codec-dir", type=str,
+                        help="Directory containing precomputed Mimi codec .npz files (a 'codes' "
+                             "array of shape (layers, T)). Skips the Mimi encode step.")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory to write .npz latent files to.")
-    parser.add_argument("--layers", type=int, default=16, help="Number of Mimi codec layers to keep (default: 16).")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for Mimi encoding (default: 8).")
+    parser.add_argument("--layers", type=int, default=2, help="Number of Mimi codec layers to keep (default: 16).")
     parser.add_argument("--ext", action="append", help="Additional audio extension to include (may be repeated).")
     parser.add_argument("--limit", "--samples", dest="limit", type=int, default=None,
                         help="Only process the first N audio files (for testing).")
@@ -91,44 +101,53 @@ def main() -> None:
     print_section("Device")
     print_info("Selected", str(device), Colors.OKCYAN)
 
-    # --- Discover audio files -----------------------------------------------
-    audio_dir = Path(args.audio_dir)
+    # --- Discover input files -----------------------------------------------
+    from_codecs = args.codec_dir is not None
+    input_dir = Path(args.codec_dir if from_codecs else args.audio_dir)
     output_dir = Path(args.output_dir)
-    if not audio_dir.is_dir():
-        print_error(f"Audio directory not found: {audio_dir}")
+    if not input_dir.is_dir():
+        kind = "Codec" if from_codecs else "Audio"
+        print_error(f"{kind} directory not found: {input_dir}")
         sys.exit(1)
 
-    exts = set(_AUDIO_EXTS)
-    if args.ext:
-        exts.update(e.lower() for e in args.ext)
+    if from_codecs:
+        files = sorted(p for p in input_dir.rglob("*.npz") if p.is_file())
+    else:
+        exts = set(_AUDIO_EXTS)
+        if args.ext:
+            exts.update(e.lower() for e in args.ext)
 
-    files = sorted(
-        p for p in audio_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in exts
-    )
+        files = sorted(
+            p for p in input_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in exts
+        )
     if args.limit is not None:
         files = files[: args.limit]
 
     if not files:
-        print_error(f"No audio files found in {audio_dir}")
+        kind = "codec .npz files" if from_codecs else "audio files"
+        print_error(f"No {kind} found in {input_dir}")
         sys.exit(1)
 
     print_section("Input")
-    print_info("Audio dir", str(audio_dir), Colors.OKCYAN)
+    print_info("Codec dir" if from_codecs else "Audio dir", str(input_dir), Colors.OKCYAN)
     print_info("Output dir", str(output_dir), Colors.OKCYAN)
     print_info("Mimi layers", str(args.layers))
-    print_info("Batch size", str(args.batch_size))
     print_info("Files found", str(len(files)))
 
     # --- Load Mimi -----------------------------------------------------------
     print_section("Loading Mimi model")
     t_model = time.perf_counter()
     mimi = MimiModel.from_pretrained("kyutai/mimi").to(device).eval()
-    feature_extractor = AutoFeatureExtractor.from_pretrained("kyutai/mimi")
-    mimi_sr = feature_extractor.sampling_rate
-    assert mimi_sr == _MIMI_SR, f"Expected Mimi sample rate {_MIMI_SR}, got {mimi_sr}"
+    feature_extractor = None
+    if not from_codecs:
+        # Only the encode path needs it; reading codecs from disk does not.
+        feature_extractor = AutoFeatureExtractor.from_pretrained("kyutai/mimi")
+        mimi_sr = feature_extractor.sampling_rate
+        assert mimi_sr == _MIMI_SR, f"Expected Mimi sample rate {_MIMI_SR}, got {mimi_sr}"
     mimi_time = time.perf_counter() - t_model
     print_info("Sample rate", f"{_MIMI_SR} Hz")
+    print_info("Mode", "decode only (codecs read from disk)" if from_codecs else "encode → decode")
     print_info("Model load time", f"{mimi_time:.3f}s", Colors.OKCYAN)
 
     # --- Load BlueCodec ------------------------------------------------------
@@ -140,84 +159,62 @@ def main() -> None:
     print_info("Latent channels", str(_NUM_CHANNELS))
     print_info("Model load time", f"{blue_time:.3f}s", Colors.OKCYAN)
 
-    # --- Process in batches -------------------------------------------------
+    # --- Process one file at a time ------------------------------------------
     print_section("Processing")
     t_total = time.perf_counter()
     n_ok, n_fail = 0, 0
 
-    progress = tqdm(range(0, len(files), args.batch_size), desc="Processing", unit="batch")
-    for bi in progress:
-        batch_files = files[bi : bi + args.batch_size]
+    progress = tqdm(files, desc="Processing", unit="file")
+    for src in progress:
+        try:
+            if from_codecs:
+                # Step 1+2 replaced: read the codec and truncate it to --layers.
+                with np.load(src) as data:
+                    code_arr = data["codes"][: args.layers].astype(np.int64)
+                codes = torch.from_numpy(code_arr).unsqueeze(0).to(device)  # (1, layers, T)
+                orig_len = code_arr.shape[1] * _MIMI_FRAME
+            else:
+                # Step 1: Load + resample to 24 kHz mono (Mimi input).
+                audio, _ = librosa.load(str(src), sr=_MIMI_SR, mono=True)
+                orig_len = len(audio)
 
-        # Step 1: Load + resample to 24 kHz mono (Mimi input).
-        audios = []
-        for p in batch_files:
-            try:
-                a, _ = librosa.load(str(p), sr=_MIMI_SR, mono=True)
-                audios.append(a)
-            except Exception as e:  # noqa: BLE001
-                print_error(f"Failed to load {p.name}: {e}")
-                audios.append(None)
+                # Step 2: Mimi encode.
+                inputs = feature_extractor(
+                    raw_audio=[audio.astype(np.float32).tolist()],
+                    sampling_rate=_MIMI_SR,
+                    return_tensors="pt",
+                )
+                input_values = inputs["input_values"].to(device)
 
-        ok_idx = [i for i, a in enumerate(audios) if a is not None]
-        if not ok_idx:
-            n_fail += len(batch_files)
-            continue
-
-        ok_files = [batch_files[i] for i in ok_idx]
-        ok_audios = [audios[i] for i in ok_idx]
-        n_fail += len(batch_files) - len(ok_files)
-
-        # Step 2: Mimi encode (batched).
-        lengths = np.array([len(a) for a in ok_audios], dtype=np.int64)
-        max_len = int(lengths.max())
-        batch_arr = np.zeros((len(ok_audios), max_len), dtype=np.float32)
-        for i, a in enumerate(ok_audios):
-            batch_arr[i, : len(a)] = a
-
-        inputs = feature_extractor(
-            raw_audio=batch_arr.tolist(),
-            sampling_rate=_MIMI_SR,
-            return_tensors="pt",
-        )
-        input_values = inputs["input_values"].to(device)
-
-        with torch.no_grad():
-            enc = mimi.encode(input_values)
-        codes = enc.audio_codes[:, : args.layers, :]  # (B, layers, T_codec)
-
-        # Step 3: Mimi decode back to audio (batched).
-        with torch.no_grad():
-            dec_out = mimi.decode(codes)
-        # dec_out returns (audio_values, ...) or MimiDecoderOutput
-        if isinstance(dec_out, tuple):
-            decoded_audio = dec_out[0]
-        else:
-            decoded_audio = dec_out.audio_values
-        # decoded_audio: (B, 1, T_audio) — trim to original lengths
-        decoded_audio = decoded_audio.squeeze(1)  # (B, T_audio)
-
-        # Step 4: Resample each decoded audio to 44.1 kHz and encode with BlueCodec.
-        for j, src in enumerate(ok_files):
-            try:
-                orig_len = int(lengths[j])
-                audio_mimi = decoded_audio[j, :orig_len].unsqueeze(0)  # (1, T)
-                # Resample 24kHz -> 44.1kHz
-                audio_441 = torchaudio.functional.resample(audio_mimi, _MIMI_SR, _BLUE_SR)
-
-                audio_dev = audio_441.to(device)
                 with torch.no_grad():
-                    latents = blue.encode(audio_dev)
-                latents_np = latents.detach().cpu().numpy().astype(np.float32)
-                latents_np = latents_np.squeeze(0)  # (1, C, T) -> (C, T)
+                    enc = mimi.encode(input_values)
+                codes = enc.audio_codes[:, : args.layers, :]      # (1, layers, T_codec)
 
-                rel = src.relative_to(audio_dir)
-                out_path = output_dir / rel.with_suffix(".npz")
-                _save_latents(latents_np, out_path)
-                n_ok += 1
-            except Exception as e:  # noqa: BLE001
-                print_error(f"Failed to process {src.name}: {e}")
-                n_fail += 1
+            # Step 3: Mimi decode back to audio.
+            with torch.no_grad():
+                dec_out = mimi.decode(codes)
+            # dec_out returns (audio_values, ...) or MimiDecoderOutput
+            if isinstance(dec_out, tuple):
+                decoded_audio = dec_out[0]
+            else:
+                decoded_audio = dec_out.audio_values
+            decoded_audio = decoded_audio.squeeze(1)              # (1, T_audio)
+
+            # Step 4: Resample the decoded audio to 44.1 kHz and encode with BlueCodec.
+            audio_mimi = decoded_audio[:, :orig_len]              # (1, T)
+            audio_441 = torchaudio.functional.resample(audio_mimi, _MIMI_SR, _BLUE_SR)
+
+            with torch.no_grad():
+                latents = blue.encode(audio_441.to(device))
+            latents_np = latents.detach().cpu().numpy().astype(np.float32)
+            latents_np = latents_np.squeeze(0)                    # (1, C, T) -> (C, T)
+
+            rel = src.relative_to(input_dir)
+            _save_latents(latents_np, output_dir / rel.with_suffix(".npz"))
+            n_ok += 1
+        except Exception as e:  # noqa: BLE001
+            print_error(f"Failed to process {src.name}: {e}")
+            n_fail += 1
 
         progress.set_postfix(ok=n_ok, fail=n_fail)
 

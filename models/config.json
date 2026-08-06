@@ -140,8 +140,8 @@
     },
     "fm": {
       "data_dir": "data/norbi",
-      "output_dir": "checkpoints",
-      "batch_size": 16,
+      "output_dir": "checkpoints/kanclerz",
+      "batch_size": 8,
       "num_epochs": 30,
       "val_ratio": 0.05,
       "learning_rate": 3e-4,
