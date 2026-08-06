@@ -107,7 +107,7 @@
 
   "training": {
     "ar": {
-      "data_dir": "data/kanclerz",
+      "data_dir": "data/norbi",
       "output_dir": "checkpoints/kanclerz",
       "batch_size": 8,
       "num_epochs": 30,
@@ -153,7 +153,7 @@
       "save_every": 2,
       "early_stop": 5,
       "seed": 42,
-      "text_dropout": 0.2
+      "text_dropout": 0.1
     }
   }
 }
