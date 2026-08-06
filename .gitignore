@@ -130,4 +130,4 @@ models/*.pth
 checkpoints/*.pt
 
 # Misc
-checkpoints/*.csv
+checkpoints/**

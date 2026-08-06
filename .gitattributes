@@ -1,4 +1,6 @@
 data/norbi/codecs.zip filter=lfs diff=lfs merge=lfs -text
 data/norbi/latents.zip filter=lfs diff=lfs merge=lfs -text
 data/norbi/distils.zip filter=lfs diff=lfs merge=lfs -text
+data/kanclerz/codecs.zip filter=lfs diff=lfs merge=lfs -text
+data/kanclerz/latents.zip filter=lfs diff=lfs merge=lfs -text
 checkpoints/echo_final.pt filter=lfs diff=lfs merge=lfs -text
