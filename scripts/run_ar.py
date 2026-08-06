@@ -9,9 +9,12 @@ Only the first ``EchoAR.NUM_TOKEN_LAYERS`` codebooks are modelled, so Mimi
 reconstructs from those alone — expect coarse audio; this checks prosody and
 timing, not fidelity.
 
+``--text`` takes raw text; it is phonemized with the ``phonemizer`` package
+(eSpeak NG) before tokenization.
+
 Usage:
     python scripts/run_ar.py --model checkpoints/echo_ar_final.pt \\
-        --text "həlˈOʊ wˈɜːld" --output out.wav
+        --text "hello world" --output out.wav
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import torchaudio
 from transformers import MimiModel
 
 from __style__ import Colors, print_header, print_info, print_section, print_separator
+from __phonemize__ import add_phonemize_args, phonemize_args
 
 from echo import config
 from echo.ar_model import EchoAR
@@ -70,14 +74,18 @@ def main() -> None:
     parser.add_argument("--model", type=str, required=True,
                         help="Path to a training checkpoint (.pt).")
     parser.add_argument("--text", type=str, required=True,
-                        help="Phoneme string to synthesize.")
+                        help="Raw text to synthesize (phonemized with eSpeak).")
     parser.add_argument("--max-frames", type=int, default=1000,
                         help="Hard cap on generated frames (default: 1000, i.e. 80s).")
     parser.add_argument("--output", type=str, default="output.wav",
                         help="Output audio path.")
+    add_phonemize_args(parser)
     args = parser.parse_args()
 
     device = _select_device()
+
+    # --- Text -> phonemes ----------------------------------------------------
+    phonemes = phonemize_args(args.text, args)
 
     # --- Model --------------------------------------------------------------
     model = EchoAR().to(device)
@@ -86,13 +94,16 @@ def main() -> None:
     model.eval()
 
     tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")
-    text_ids = torch.tensor([tokenizer.tokenize(args.text)], dtype=torch.long, device=device)
+    text_ids = torch.tensor([tokenizer.tokenize(phonemes)], dtype=torch.long, device=device)
 
     print_header("Echo - Autoregressive Generation")
     print_separator()
     print_section("Setup")
     print_info("Device", str(device), Colors.OKCYAN)
     print_info("Checkpoint", args.model)
+    print_info("Language", args.language)
+    if args.print_phonemes:
+        print_info("Phonemes", phonemes, Colors.OKCYAN)
     print_info("Text tokens", str(text_ids.shape[1]))
     print_info("Codec layers", str(EchoAR.NUM_TOKEN_LAYERS))
     print_info("Max frames", str(args.max_frames))

@@ -18,15 +18,18 @@ maps the token grid straight to a distil latent and skips both codecs:
 The AR stage decides the duration (it stops when it emits EOS), so nothing about
 the length needs to be supplied.
 
+``--text`` takes raw text; it is phonemized with the ``phonemizer`` package
+(eSpeak NG) before tokenization.
+
 Usage:
     python scripts/run_full.py --ar-model checkpoints/echo_ar_best.pt \\
-        --fm-model checkpoints/echo_final.pt --text "həlˈOʊ wˈɜːld" \\
+        --fm-model checkpoints/echo_final.pt --text "hello world" \\
         --steps 8 --cfg 3.0 --output out.wav
 
     python scripts/run_full.py --ar-model checkpoints/echo_ar_best.pt \\
         --fm-model checkpoints/echo_final.pt \\
         --shortcut-model checkpoints/echo_shortcut_best.pt \\
-        --text "həlˈOʊ wˈɜːld" --output out.wav
+        --text "hello world" --output out.wav
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ from bluecodec import BlueCodec
 from transformers import MimiModel
 
 from __style__ import Colors, print_header, print_info, print_section, print_separator
+from __phonemize__ import add_phonemize_args, phonemize_args
 
 from echo import config
 from echo.ar_model import EchoAR
@@ -130,7 +134,7 @@ def main() -> None:
                              "the end makes BlueCodec ring loudly, so the tail is trimmed. "
                              "Pass 6.88 to disable.")
     parser.add_argument("--text", type=str, required=True,
-                        help="Phoneme string to synthesize.")
+                        help="Raw text to synthesize (phonemized with eSpeak).")
     parser.add_argument("--max-frames", type=int, default=1000,
                         help="Hard cap on AR frames (default: 1000, i.e. 80s).")
     parser.add_argument("--steps", type=int, default=8,
@@ -151,6 +155,7 @@ def main() -> None:
     parser.add_argument("--save-intermediate", action="store_true",
                         help="Also write the AR/Mimi stage as <output stem>_ar.wav.")
     parser.add_argument("--output", type=str, default="output.wav", help="Output audio path.")
+    add_phonemize_args(parser)
     args = parser.parse_args()
 
     if args.cut_last < 0:
@@ -196,7 +201,8 @@ def main() -> None:
     blue = BlueCodec.from_pretrained("notmax123/blue-codec", device=str(device))
 
     tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")
-    text_ids = torch.tensor([tokenizer.tokenize(args.text)], dtype=torch.long, device=device)
+    phonemes = phonemize_args(args.text, args)
+    text_ids = torch.tensor([tokenizer.tokenize(phonemes)], dtype=torch.long, device=device)
 
     timings: dict[str, float] = {}
 
@@ -212,6 +218,9 @@ def main() -> None:
                    Colors.OKCYAN)
     else:
         print_info("Middle stage", "Mimi decode -> BlueCodec encode")
+    print_info("Language", args.language)
+    if args.print_phonemes:
+        print_info("Phonemes", phonemes, Colors.OKCYAN)
     print_info("Text tokens", str(text_ids.shape[1]))
     print_info("Steps", str(args.steps))
     print_info("Solver", args.solver)

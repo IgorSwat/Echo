@@ -8,9 +8,13 @@ sampling starts from the provided distil latent at ``t = 0`` and solves the ODE
 (``--solver euler`` or the second-order ``--solver midpoint``/RK2).
 The resulting audio latent is decoded to a waveform with BlueCodec.
 
+``--text`` takes raw text; it is phonemized with the ``phonemizer`` package
+(eSpeak NG) before tokenization. Test-suite entries are already phonemized and
+are used verbatim.
+
 Usage:
     # Single sample
-    python scripts/run.py --model checkpoints/echo_final.pt --text "həlˈOʊ wˈɜːld" \\
+    python scripts/run.py --model checkpoints/echo_final.pt --text "hello world" \\
         --distil data/distils/clone_0000.npz --steps 8 --cfg 3.0 --output out.wav
 
     # Full test suite
@@ -39,6 +43,7 @@ import torchaudio
 from bluecodec import BlueCodec
 
 from __style__ import Colors, print_header, print_info, print_section, print_separator
+from __phonemize__ import add_phonemize_args, phonemize_args
 
 from echo import config
 from echo.fm_model import EchoFM
@@ -164,7 +169,8 @@ def _load_latent_stats(stats_path: Path, device: torch.device) -> tuple[torch.Te
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate audio with Echo.")
     parser.add_argument("--model", type=str, required=True, help="Path to a training checkpoint (.pt).")
-    parser.add_argument("--text", type=str, default=None, help="Phoneme string to synthesize.")
+    parser.add_argument("--text", type=str, default=None,
+                        help="Raw text to synthesize (phonemized with eSpeak).")
     parser.add_argument("--distil", type=str, default=None,
                         help="Path to a .npz file with the starting distil latent (shape (C, T)).")
     parser.add_argument("--test-suite", type=str, default=None,
@@ -181,6 +187,7 @@ def main() -> None:
              "Defaults to <data_dir>/latents/latent_stats.npz from the training config.",
     )
     parser.add_argument("--output", type=str, default="output.wav", help="Output audio path (single-sample mode).")
+    add_phonemize_args(parser)
     args = parser.parse_args()
 
     if args.test_suite is None and (args.text is None or args.distil is None):
@@ -250,6 +257,7 @@ def main() -> None:
         # --- Single-sample mode ---------------------------------------------
         distil_path = Path(args.distil)
         distil, duration = _load_and_normalize_distil(distil_path, device, stats)
+        phonemes = phonemize_args(args.text, args)
 
         print_header("Echo - Generation")
         print_separator()
@@ -257,6 +265,9 @@ def main() -> None:
         print_info("Device", str(device), Colors.OKCYAN)
         print_info("Checkpoint", args.model)
         print_info("Distil", str(distil_path))
+        print_info("Language", args.language)
+        if args.print_phonemes:
+            print_info("Phonemes", phonemes, Colors.OKCYAN)
         print_info("Duration", f"{duration:.2f}s")
         print_info("Steps", str(args.steps))
         print_info("Solver", args.solver)
@@ -266,7 +277,7 @@ def main() -> None:
         else:
             print_info("Latent norm", f"disabled (stats not found: {stats_path})", Colors.WARNING)
 
-        _generate_one(model, tokenizer, codec, args.text, distil, duration,
+        _generate_one(model, tokenizer, codec, phonemes, distil, duration,
                       args.steps, args.cfg, args.solver, stats, device, Path(args.output))
 
         print_separator()

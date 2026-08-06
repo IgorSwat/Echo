@@ -72,6 +72,11 @@ class EchoAR(nn.Module):
     # How many decoding steps to run between two EOS checks.
     EOS_CHECK_EVERY = 6
 
+    # Size of Mimi's acoustic codebooks: ids [0, 2047] address a real entry,
+    # everything above is one of the special tokens (pad/bos/eos), which the
+    # codec cannot decode. ``prosody_pad`` is the lowest of them.
+    CODEBOOK_SIZE = config.prosody_pad
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -268,4 +273,12 @@ class EchoAR(nn.Module):
         # much of the padded tail survives.
         keep = int(lengths.max())
 
-        return x[:, 1:1 + keep]                                      # (B, T, layers), BOS dropped
+        out_tokens = x[:, 1:1 + keep]                                # (B, T, layers), BOS dropped
+
+        # Termination is read off layer 0 alone, so any special id the other
+        # layers emit — or any id at all outside the acoustic codebook — can
+        # survive the trim. Mimi's decoder indexes its codebooks with these
+        # directly, and an out-of-range id faults the lookup kernel, so
+        # everything outside [0, CODEBOOK_SIZE - 1] is folded back to 0.
+        valid = (out_tokens >= 0) & (out_tokens < self.CODEBOOK_SIZE)
+        return torch.where(valid, out_tokens, torch.zeros_like(out_tokens))
