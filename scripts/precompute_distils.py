@@ -8,15 +8,18 @@ With ``--codec-dir`` the Mimi encode step is skipped: the codecs are read from
 ``precompute_codecs.py``) and the pipeline starts at the truncate step.
 
 With ``--model-ar`` the codec layer is replaced by the AR model's *own* tokens,
-produced under teacher forcing: the model reads the ground-truth history and
-predicts every next frame in one pass. The flow-matching model then trains on
-the kind of input it actually meets at inference — tokens carrying the AR's
-error statistics — instead of on ground truth it will never see. Teacher forcing
-is what keeps this usable: because the history is never the model's own, the
-prediction for frame ``i`` still lines up with frame ``i`` of the real audio, and
-the sequence ends where the real one ends, so the frame-wise flow-matching loss
-stays meaningful. Free-running decoding would drift in both content and length
-and destroy that correspondence.
+generated free-running from the phonemes alone: the model starts at BOS and
+feeds on its own frames until EOS. The flow-matching model then trains on the
+kind of input it actually meets at inference — full AR output, drift included —
+instead of on ground truth it will never see.
+
+A freely generated sequence has a length of its own, so the decoded audio is
+re-aligned to the real utterance before BlueCodec sees it: clipped if the AR ran
+long, zero-padded (silence) at the tail if it ran short. The latents therefore
+always match the target ones frame-for-frame.
+
+The ground-truth codec is still needed — it fixes that target length — so
+``--model-ar`` requires ``--codec-dir``.
 
 A fraction ``--clean-fraction`` of the files keeps the ground-truth codec, so the
 resulting dataset covers both input distributions the flow-matching model meets:
@@ -61,7 +64,6 @@ from tqdm import tqdm  # noqa: E402
 from transformers import MimiModel, AutoFeatureExtractor  # noqa: E402
 from bluecodec import BlueCodec  # noqa: E402
 
-from echo import config  # noqa: E402
 from echo.ar_model import EchoAR  # noqa: E402
 from echo.tokenizer import Tokenizer  # noqa: E402
 
@@ -112,69 +114,30 @@ def _load_phoneme_map(csv_path: Path) -> dict[str, str]:
 
 
 @torch.no_grad()
-def _teacher_forced_codes(
+def _generated_codes(
     model: EchoAR,
-    codes: torch.Tensor,                                 # (1, layers, T) ground-truth
     text: torch.Tensor,                                  # (1, S) phoneme ids
+    max_frames: int,
     temperature: float = 0.0,
     top_k: int = 0,
 ) -> torch.Tensor:
     """
-    The AR model's own tokens for a sequence, with the history teacher-forced.
+    The AR model's own tokens for an utterance, decoded free-running from text.
 
-    The model reads ``[BOS, frame_0 ... frame_{T-1}]`` — all ground truth — and
-    every position predicts the frame after it, so one pass yields a prediction
-    for all ``T`` frames aligned one-to-one with the real ones. The output is
-    therefore exactly ``T`` frames long, whatever the model thinks.
+    Nothing of the ground-truth codec enters here: the model starts at BOS and
+    feeds on its own frames until it emits EOS or hits ``max_frames``. That is
+    exactly the input the flow-matching model meets at inference, drift and all.
 
-    Layers within a frame are produced in sequence, not in parallel: with
-    intra-frame conditioning on, head ``k`` reads layer ``k - 1`` of the same
-    frame, and it must read the layer *this function just predicted*, not the
-    ground-truth one. Mixing the two would build frames the AR could never emit
-    — precisely the off-distribution inputs this whole path exists to avoid.
-    The decoder trunk runs once and only the heads are re-evaluated.
-
-    Special ids are suppressed before the draw: BOS/EOS/pad/mask do not address
-    a Mimi codebook entry, and the sequence length is fixed by the ground truth
-    anyway, so an EOS here would be meaningless.
+    The returned length is whatever the model chose, so it will rarely match the
+    real utterance; the caller re-aligns it (zero-pad or clip) afterwards.
     """
-    T = codes.shape[2]
-    # (1, T, layers) frame-major, as the AR model reads it.
-    frames = codes.squeeze(0).T.unsqueeze(0)                       # (1, T, layers)
-    bos = torch.full(
-        (1, 1, model.NUM_TOKEN_LAYERS), config.prosody_bos,
-        dtype=frames.dtype, device=frames.device,
-    )
-    inputs = torch.cat([bos, frames], dim=1)[:, :T]                # (1, T, layers)
-
-    h, _ = model._trunk(inputs, text=text)                         # (1, T, hidden)
-
-    out_layers: list[torch.Tensor] = []
-    cond: torch.Tensor | None = None                               # (1, T) token ids or None
-    for k in range(model.NUM_TOKEN_LAYERS):
-        logits = model._head(k, h, cond)                           # (1, T, vocab)
-        logits[..., config.prosody_bos] = float("-inf")
-        logits[..., config.prosody_eos] = float("-inf")
-        logits[..., config.prosody_pad] = float("-inf")
-        logits[..., config.prosody_mask] = float("-inf")
-
-        if temperature <= 0.0:
-            tok = logits.argmax(dim=-1)                            # (1, T)
-        else:
-            scaled = logits / temperature
-            if top_k > 0:
-                kth = scaled.topk(min(top_k, scaled.shape[-1]), dim=-1).values[..., -1:]
-                scaled = scaled.masked_fill(scaled < kth, float("-inf"))
-            probs = scaled.softmax(dim=-1).reshape(-1, scaled.shape[-1])
-            tok = torch.multinomial(probs, num_samples=1).reshape(1, T)
-
-        out_layers.append(tok)
-        # Head k + 1 conditions on the layer just drawn, exactly as decoding does.
-        # ``_head`` embeds the ids itself, so the raw tokens are what it wants.
-        cond = tok if model.film is not None else None
-
-    pred = torch.stack(out_layers, dim=2)                          # (1, T, layers)
-    return pred.squeeze(0).T.unsqueeze(0)                          # (1, layers, T)
+    gen = model.generate(
+        text,
+        max_frames=max_frames,
+        temperature=temperature,
+        top_k=top_k,
+    )                                                              # (1, T_gen, layers)
+    return gen.transpose(1, 2).contiguous()                        # (1, layers, T_gen)
 
 
 def main() -> None:
@@ -192,11 +155,11 @@ def main() -> None:
     parser.add_argument("--limit", "--samples", dest="limit", type=int, default=None,
                         help="Only process the first N audio files (for testing).")
 
-    ar = parser.add_argument_group("AR teacher forcing")
+    ar = parser.add_argument_group("AR generation")
     ar.add_argument("--model-ar", type=str, default=None,
                     help="Path to an EchoAR checkpoint. When given, the codec tokens are "
-                         "replaced by the model's own teacher-forced predictions before "
-                         "decoding. Requires --codec-dir.")
+                         "replaced by a full free-running generation from the phonemes, "
+                         "re-aligned to the real length. Requires --codec-dir.")
     ar.add_argument("--phonemes", type=str, default=None,
                     help="phonemes.csv mapping <name>.npz to a phoneme string "
                          "(default: <codec-dir>/../phonemes.csv). Only used with --model-ar.")
@@ -217,7 +180,7 @@ def main() -> None:
 
     use_ar = args.model_ar is not None
     if use_ar and args.codec_dir is None:
-        parser.error("--model-ar requires --codec-dir: teacher forcing needs the ground-truth codec")
+        parser.error("--model-ar requires --codec-dir: the ground-truth codec fixes the target length")
     if not 0.0 <= args.clean_fraction <= 1.0:
         parser.error(f"--clean-fraction must be in [0, 1], got {args.clean_fraction}")
     if use_ar and args.layers != EchoAR.NUM_TOKEN_LAYERS:
@@ -333,7 +296,7 @@ def main() -> None:
     t_total = time.perf_counter()
     n_ok, n_fail = 0, 0
     n_clean, n_ar = 0, 0
-    disagree_sum, disagree_files = 0.0, 0
+    len_ratio_sum, len_ratio_files = 0.0, 0
 
     if use_ar:
         torch.manual_seed(args.seed)
@@ -363,12 +326,16 @@ def main() -> None:
                         text = torch.tensor(
                             tokenizer.tokenize(phonemes), dtype=torch.long, device=device
                         ).unsqueeze(0)                              # (1, S)
-                        pred = _teacher_forced_codes(
-                            ar_model, codes, text,
+                        T_ref = codes.shape[2]
+                        pred = _generated_codes(
+                            ar_model, text,
+                            # A generous ceiling: the model is free to run long,
+                            # the excess is clipped away below anyway.
+                            max_frames=int(T_ref * 2) + 50,
                             temperature=args.temperature, top_k=args.top_k,
-                        )                                           # (1, layers, T)
-                        disagree_sum += float((pred != codes).float().mean())
-                        disagree_files += 1
+                        )                                           # (1, layers, T_gen)
+                        len_ratio_sum += pred.shape[2] / max(1, T_ref)
+                        len_ratio_files += 1
                         codes = pred
                         n_ar += 1
             else:
@@ -389,17 +356,29 @@ def main() -> None:
                 codes = enc.audio_codes[:, : args.layers, :]      # (1, layers, T_codec)
 
             # Step 3: Mimi decode back to audio.
-            with torch.no_grad():
-                dec_out = mimi.decode(codes)
-            # dec_out returns (audio_values, ...) or MimiDecoderOutput
-            if isinstance(dec_out, tuple):
-                decoded_audio = dec_out[0]
+            if codes.shape[2] == 0:
+                # The AR emitted EOS immediately; nothing to decode, and the
+                # zero-padding below turns it into pure silence of the right length.
+                decoded_audio = torch.zeros(1, 0, device=device)
             else:
-                decoded_audio = dec_out.audio_values
-            decoded_audio = decoded_audio.squeeze(1)              # (1, T_audio)
+                with torch.no_grad():
+                    dec_out = mimi.decode(codes)
+                # dec_out returns (audio_values, ...) or MimiDecoderOutput
+                if isinstance(dec_out, tuple):
+                    decoded_audio = dec_out[0]
+                else:
+                    decoded_audio = dec_out.audio_values
+                decoded_audio = decoded_audio.squeeze(1)          # (1, T_audio)
 
-            # Step 4: Resample the decoded audio to 44.1 kHz and encode with BlueCodec.
+            # Step 4: Force the decoded audio onto the real utterance's length —
+            # a freely generated sequence has a length of its own, but the latents
+            # have to line up frame-for-frame with the target ones. Too long is
+            # clipped, too short is zero-padded (silence) at the tail.
             audio_mimi = decoded_audio[:, :orig_len]              # (1, T)
+            if audio_mimi.shape[1] < orig_len:
+                audio_mimi = torch.nn.functional.pad(
+                    audio_mimi, (0, orig_len - audio_mimi.shape[1])
+                )
             audio_441 = torchaudio.functional.resample(audio_mimi, _MIMI_SR, _BLUE_SR)
 
             with torch.no_grad():
@@ -426,11 +405,11 @@ def main() -> None:
     if use_ar:
         print_info("Ground-truth codecs", f"{n_clean} ({n_clean / max(1, n_clean + n_ar):.1%})",
                    Colors.OKCYAN)
-        print_info("AR teacher-forced", f"{n_ar} ({n_ar / max(1, n_clean + n_ar):.1%})",
+        print_info("AR generated", f"{n_ar} ({n_ar / max(1, n_clean + n_ar):.1%})",
                    Colors.OKCYAN)
-        if disagree_files:
-            print_info("Mean token disagreement", f"{disagree_sum / disagree_files:.3f}",
-                       Colors.OKCYAN)
+        if len_ratio_files:
+            print_info("Mean generated/real length",
+                       f"{len_ratio_sum / len_ratio_files:.3f}", Colors.OKCYAN)
     print_info("Total time", f"{elapsed:.2f}s", Colors.OKCYAN)
     if n_ok:
         print_info("Throughput", f"{n_ok / elapsed:.2f} files/s", Colors.OKCYAN)
