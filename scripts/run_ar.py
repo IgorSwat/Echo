@@ -2,8 +2,12 @@
 """Generate audio with a trained EchoAR prosody model.
 
 The model decodes Mimi codec tokens autoregressively from text alone: it starts
-from a ``[BOS, BOS]`` frame and greedily appends one frame at a time until it
-emits EOS. The resulting token grid is decoded to a waveform by Mimi itself.
+from a ``[BOS, BOS]`` frame and appends one frame at a time until it emits EOS.
+The resulting token grid is decoded to a waveform by Mimi itself.
+
+Decoding is greedy unless ``--temperature`` is given. Greedy is deterministic
+and mode-seeking on a stream this noisy; sampling near ``--temperature 1.0``
+matches the training data's token statistics far more closely.
 
 Only the first ``EchoAR.NUM_TOKEN_LAYERS`` codebooks are modelled, so Mimi
 reconstructs from those alone — expect coarse audio; this checks prosody and
@@ -77,10 +81,22 @@ def main() -> None:
                         help="Raw text to synthesize (phonemized with eSpeak).")
     parser.add_argument("--max-frames", type=int, default=1000,
                         help="Hard cap on generated frames (default: 1000, i.e. 80s).")
+    parser.add_argument("--temperature", type=float, default=0.0, metavar="T",
+                        help="Sampling temperature (default: 0.0 = greedy). Around 1.0 the "
+                             "emitted token statistics track the training data much more "
+                             "closely than greedy does; greedy is deterministic and blander.")
+    parser.add_argument("--top-k", type=int, default=0, metavar="K",
+                        help="Restrict each draw to the K most likely ids (default: 0 = off). "
+                             "Only applies when --temperature > 0.")
     parser.add_argument("--output", type=str, default="output.wav",
                         help="Output audio path.")
     add_phonemize_args(parser)
     args = parser.parse_args()
+
+    if args.temperature < 0:
+        parser.error("--temperature must be >= 0 (0 selects greedy decoding)")
+    if args.top_k < 0:
+        parser.error("--top-k must be >= 0 (0 disables top-k)")
 
     device = _select_device()
 
@@ -107,9 +123,17 @@ def main() -> None:
     print_info("Text tokens", str(text_ids.shape[1]))
     print_info("Codec layers", str(EchoAR.NUM_TOKEN_LAYERS))
     print_info("Max frames", str(args.max_frames))
+    if args.temperature > 0:
+        print_info("Decoding", f"sampling (temperature {args.temperature:g}"
+                               + (f", top-k {args.top_k}" if args.top_k > 0 else "") + ")",
+                   Colors.OKCYAN)
+    else:
+        print_info("Decoding", "greedy (argmax)")
 
     # --- Generate -----------------------------------------------------------
-    codes = model.generate(text_ids, max_frames=args.max_frames)     # (1, T, layers)
+    codes = model.generate(text_ids, max_frames=args.max_frames,
+                           temperature=args.temperature,
+                           top_k=args.top_k)                         # (1, T, layers)
     frames = codes.shape[1]
 
     print_section("Generation")

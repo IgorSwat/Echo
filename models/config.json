@@ -5,7 +5,7 @@
 
   "vocab_size": {
     "text": 256,
-    "prosody": 2051
+    "prosody": 2052
   },
 
   "limits": {
@@ -16,7 +16,8 @@
     "text_pad": 0,
     "prosody_pad": 2048,
     "prosody_bos": 2049,
-    "prosody_eos": 2050
+    "prosody_eos": 2050,
+    "prosody_mask": 2051
   },
 
   "ar_model": {
@@ -48,7 +49,8 @@
     "head": {
       "num_layers": 2,
       "hidden_dim": 1024,
-      "dropout": 0.1
+      "dropout": 0.1,
+      "intra_frame_cond": true
     }
   },
 
@@ -107,9 +109,9 @@
 
   "training": {
     "ar": {
-      "data_dir": "data/norbi",
-      "output_dir": "checkpoints/kanclerz",
-      "batch_size": 8,
+      "data_dir": "data/ljspeech",
+      "output_dir": "checkpoints/ljspeech",
+      "batch_size": 16,
       "num_epochs": 30,
       "val_ratio": 0.05,
       "learning_rate": 5e-4,
@@ -123,8 +125,8 @@
       "seed": 42
     },
     "shortcut": {
-      "data_dir": "data/norbi",
-      "output_dir": "checkpoints",
+      "data_dir": "data/ljspeech",
+      "output_dir": "checkpoints/ljspeech",
       "batch_size": 16,
       "num_epochs": 30,
       "val_ratio": 0.05,
@@ -139,8 +141,8 @@
       "seed": 42
     },
     "fm": {
-      "data_dir": "data/norbi",
-      "output_dir": "checkpoints/kanclerz",
+      "data_dir": "data/ljspeech",
+      "output_dir": "checkpoints/ljspeech",
       "batch_size": 8,
       "num_epochs": 30,
       "val_ratio": 0.05,

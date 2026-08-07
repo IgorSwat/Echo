@@ -94,6 +94,13 @@ def _ar_loss(
     Padded targets are dropped via ``ignore_index``; a real token can never
     collide with the pad id because the codec alphabet stops below
     ``prosody_pad``.
+
+    Under intra-frame conditioning the lower token layers of the target frame
+    are handed back to the model as ``cond_tokens``, so head ``k`` predicts
+    layer ``k`` knowing layers ``< k`` of the very frame it is producing. That
+    is teacher forcing along the codebook axis, exactly as the frame history is
+    teacher-forced along time; the top layer is never fed to itself, so no head
+    ever sees its own label.
     """
     codec = batch["codec"].to(device)                            # (B, T, 2)
     text = batch["text"].to(device)                              # (B, S)
@@ -108,7 +115,10 @@ def _ar_loss(
     # short of the EOS itself (which is only ever a target, never read).
     input_mask = seq_mask[:, 1:]                                 # (B, T + 1)
 
-    logits = model(inputs, text, input_mask, text_mask)          # (B, T + 1, 2, V)
+    cond_tokens = targets[..., :-1] if config.ar_model.head_intra_frame_cond else None
+
+    logits = model(inputs, text, input_mask, text_mask,
+                   cond_tokens=cond_tokens)                      # (B, T + 1, 2, V)
 
     return F.cross_entropy(
         logits.reshape(-1, logits.shape[-1]),

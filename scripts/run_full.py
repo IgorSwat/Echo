@@ -27,6 +27,10 @@ Usage:
         --steps 8 --cfg 3.0 --output out.wav
 
     python scripts/run_full.py --ar-model checkpoints/echo_ar_best.pt \\
+        --fm-model checkpoints/echo_final.pt --text "hello world" \\
+        --temperature 1.0 --output out.wav
+
+    python scripts/run_full.py --ar-model checkpoints/echo_ar_best.pt \\
         --fm-model checkpoints/echo_final.pt \\
         --shortcut-model checkpoints/echo_shortcut_best.pt \\
         --text "hello world" --output out.wav
@@ -137,6 +141,13 @@ def main() -> None:
                         help="Raw text to synthesize (phonemized with eSpeak).")
     parser.add_argument("--max-frames", type=int, default=1000,
                         help="Hard cap on AR frames (default: 1000, i.e. 80s).")
+    parser.add_argument("--temperature", type=float, default=0.0, metavar="T",
+                        help="AR sampling temperature (default: 0.0 = greedy). Around 1.0 the "
+                             "emitted token statistics track the training data much more "
+                             "closely than greedy does; greedy is deterministic and blander.")
+    parser.add_argument("--top-k", type=int, default=0, metavar="K",
+                        help="Restrict each AR draw to the K most likely ids (default: 0 = off). "
+                             "Only applies when --temperature > 0.")
     parser.add_argument("--steps", type=int, default=8,
                         help="Flow-matching integration steps (default: 8).")
     parser.add_argument("--solver", choices=("euler", "midpoint"), default="euler",
@@ -162,6 +173,10 @@ def main() -> None:
         parser.error("--cut_last must be >= 0")
     if args.shortcut_trim_ratio <= 0:
         parser.error("--shortcut-trim-ratio must be > 0")
+    if args.temperature < 0:
+        parser.error("--temperature must be >= 0 (0 selects greedy decoding)")
+    if args.top_k < 0:
+        parser.error("--top-k must be >= 0 (0 disables top-k)")
 
     # BlueCodec's STFT reuses an `out` tensor that torch resizes on the first
     # call; the deprecation notice is internal to the codec and says nothing
@@ -222,6 +237,12 @@ def main() -> None:
     if args.print_phonemes:
         print_info("Phonemes", phonemes, Colors.OKCYAN)
     print_info("Text tokens", str(text_ids.shape[1]))
+    if args.temperature > 0:
+        print_info("AR decoding", f"sampling (temperature {args.temperature:g}"
+                                  + (f", top-k {args.top_k}" if args.top_k > 0 else "") + ")",
+                   Colors.OKCYAN)
+    else:
+        print_info("AR decoding", "greedy (argmax)")
     print_info("Steps", str(args.steps))
     print_info("Solver", args.solver)
     print_info("CFG scale", str(args.cfg))
@@ -233,7 +254,9 @@ def main() -> None:
     # --- Stage 1: text -> prosody tokens ------------------------------------
     print_section("Stage 1 — EchoAR")
     with _timed("ar", device, timings):
-        codes = ar_model.generate(text_ids, max_frames=args.max_frames)  # (1, T_ar, layers)
+        codes = ar_model.generate(text_ids, max_frames=args.max_frames,
+                                  temperature=args.temperature,
+                                  top_k=args.top_k)                  # (1, T_ar, layers)
     frames = codes.shape[1]
     if frames == 0:
         print_info("Frames", "0 — the model emitted EOS immediately", Colors.FAIL)

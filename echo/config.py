@@ -116,6 +116,10 @@ class ARModelConfig:
     head_num_layers: int
     head_hidden_dim: int
     head_dropout: float
+    # When set, head k > 0 is FiLM-modulated by token layer k - 1 of the same
+    # frame, so a frame factorises as P(c0 | h) * P(c1 | c0, h) instead of
+    # assuming the layers are conditionally independent given h.
+    head_intra_frame_cond: bool = False
 
     # Factory method
     @classmethod
@@ -143,6 +147,7 @@ class ARModelConfig:
             head_num_layers=hd["num_layers"],
             head_hidden_dim=hd["hidden_dim"],
             head_dropout=hd["dropout"],
+            head_intra_frame_cond=hd.get("intra_frame_cond", False),
         )
 
 
@@ -188,6 +193,7 @@ class EchoConfig:
     prosody_pad: int
     prosody_bos: int
     prosody_eos: int
+    prosody_mask: int
 
     # Flow-matching model (EchoFM)
     fm_model: FMModelConfig
@@ -217,6 +223,7 @@ class EchoConfig:
             prosody_pad=d["special_tokens"]["prosody_pad"],
             prosody_bos=d["special_tokens"]["prosody_bos"],
             prosody_eos=d["special_tokens"]["prosody_eos"],
+            prosody_mask=d["special_tokens"]["prosody_mask"],
             fm_model=FMModelConfig.from_dict(d["fm_model"]),
             ar_model=ARModelConfig.from_dict(d["ar_model"]),
             shortcut_model=ShortcutModelConfig.from_dict(d["shortcut_model"]),

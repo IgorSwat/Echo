@@ -49,21 +49,31 @@ class PredictionHead(nn.Module):
         return self.net(x)                                               # (B, T, d_out)
 
 
+class IntraFrameFiLM(nn.Module):
+    """
+    Modulate the frame state by a token from the codebook layer below it.
+    """
+
+    def __init__(self, d_model: int, d_cond: int) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model, elementwise_affine=False)
+        self.to_scale_shift = nn.Linear(d_cond, 2 * d_model)
+
+        nn.init.zeros_(self.to_scale_shift.weight)
+        nn.init.zeros_(self.to_scale_shift.bias)
+
+    def forward(
+        self,
+        h: torch.Tensor,                                             # (B, T, d_model)
+        cond_emb: torch.Tensor,                                      # (B, T, d_cond)
+    ) -> torch.Tensor:
+        scale, shift = self.to_scale_shift(cond_emb).chunk(2, dim=-1)
+        return h + (scale * self.norm(h) + shift)                    # (B, T, d_model)
+
+
 class EchoAR(nn.Module):
     """
     EchoAR: text-conditioned autoregressive model over two layers of prosody tokens.
-
-    Pipeline:
-      1. Embed both token layers with separate tables and concatenate
-         -> (B, T, 2*emb_dim).
-      2. Encode text -> (B, S, d_text) cross-attention context.
-      3. Project to hidden_dim (when needed) and run the causal
-         HybridAttentionDecoder against the text context -> H (B, T, hidden_dim).
-      4. One MLP head per token layer maps H to logits -> (B, T, 2, vocab).
-
-    Everything on the token stream is causal, so position i is built from
-    positions <= i only and the whole model can be trained with teacher forcing
-    in a single pass.
     """
 
     # Number of stacked prosody token layers (x[..., 0] and x[..., 1]).
@@ -137,6 +147,14 @@ class EchoAR(nn.Module):
             for _ in range(self.NUM_TOKEN_LAYERS)
         ])
 
+        # --- Intra-frame conditioning (one FiLM per head above the first) ---
+        # Head k is modulated by layer k - 1 of the same frame; head 0 has no
+        # lower layer to read and stays unconditioned.
+        self.film = nn.ModuleList([
+            IntraFrameFiLM(cfg.hidden_dim, cfg.emb_dim)
+            for _ in range(self.NUM_TOKEN_LAYERS - 1)
+        ]) if cfg.head_intra_frame_cond else None
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -157,7 +175,7 @@ class EchoAR(nn.Module):
 
         return self.text_encoder(text, text_padding_mask)            # (B, S, d_text)
 
-    def forward(
+    def _trunk(
         self,
         x: torch.Tensor,                                            # (B, T, 2) long
         text: Optional[torch.Tensor] = None,                        # (B, S) long or None
@@ -166,10 +184,9 @@ class EchoAR(nn.Module):
         context: Optional[torch.Tensor] = None,                     # (B, S, d_text) or None
         kv_cache: Optional[HybridKVCache] = None,                   # decoder caches, per block
         start_pos: int = 0,                                         # frames already decoded
-        return_cache: bool = False,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, HybridKVCache]]:
+    ) -> tuple[torch.Tensor, HybridKVCache]:
         """
-        Logits for every frame in `x`; with `return_cache`, the decoder caches too.
+        Everything up to the per-layer heads: the frame states and the caches.
         """
         if x.shape[-1] != self.NUM_TOKEN_LAYERS:
             raise ValueError(
@@ -196,13 +213,63 @@ class EchoAR(nn.Module):
         if self.in_proj is not None:
             h = self.in_proj(h)                                      # (B, T, hidden_dim)
 
-        h, caches = self.decoder(
+        return self.decoder(
             h, ctx, padding_mask, text_padding_mask,
             kv_cache=kv_cache, start_pos=start_pos,
+        )                                                            # (B, T_new, hidden_dim), caches
+
+    def _head(
+        self,
+        layer: int,
+        h: torch.Tensor,                                            # (B, T, hidden_dim)
+        cond: Optional[torch.Tensor] = None,                        # (B, T) long or None
+    ) -> torch.Tensor:
+        """
+        Logits for one token layer, optionally modulated by the layer below it.
+        """
+        if self.film is not None and layer > 0:
+            if cond is None:
+                raise ValueError(
+                    f"head {layer} needs layer {layer - 1}'s tokens when "
+                    "intra_frame_cond is enabled"
+                )
+            # The conditioning token is embedded with the *input* table for its
+            # own layer: same alphabet, same meaning, one less table to train.
+            h = self.film[layer - 1](h, self.embed[layer - 1](cond))
+        return self.heads[layer](h)                                  # (B, T, vocab)
+
+    def forward(
+        self,
+        x: torch.Tensor,                                            # (B, T, 2) long
+        text: Optional[torch.Tensor] = None,                        # (B, S) long or None
+        padding_mask: Optional[torch.Tensor] = None,                # (B, T) or None
+        text_padding_mask: Optional[torch.Tensor] = None,           # (B, S) or None
+        context: Optional[torch.Tensor] = None,                     # (B, S, d_text) or None
+        kv_cache: Optional[HybridKVCache] = None,                   # decoder caches, per block
+        start_pos: int = 0,                                         # frames already decoded
+        return_cache: bool = False,
+        cond_tokens: Optional[torch.Tensor] = None,                 # (B, T, 1) long or None
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, HybridKVCache]]:
+        """
+        Logits for every frame in `x`; with `return_cache`, the decoder caches too.
+        """
+        h, caches = self._trunk(
+            x, text, padding_mask, text_padding_mask, context, kv_cache, start_pos,
         )                                                            # (B, T_new, hidden_dim)
 
+        if self.film is not None and cond_tokens is None:
+            raise ValueError("intra_frame_cond is enabled; forward() needs `cond_tokens`")
+        if cond_tokens is not None and start_pos > 0:
+            cond_tokens = cond_tokens[:, start_pos:]                 # follow the `x` slice
+
         # One head per token layer, stacked to mirror the input layout.
-        logits = torch.stack([head(h) for head in self.heads], dim=2)  # (B, T, 2, vocab)
+        logits = torch.stack(
+            [
+                self._head(k, h, None if cond_tokens is None or k == 0 else cond_tokens[..., k - 1])
+                for k in range(self.NUM_TOKEN_LAYERS)
+            ],
+            dim=2,
+        )                                                            # (B, T, 2, vocab)
 
         return (logits, caches) if return_cache else logits
 
@@ -214,14 +281,22 @@ class EchoAR(nn.Module):
         max_frames: int = 1000,
         use_cache: bool = True,
         eos_check_every: Optional[int] = None,
+        temperature: float = 0.0,
+        top_k: int = 0,
     ) -> torch.Tensor:
-        """Greedy autoregressive decoding from text alone.
-
+        """
+        Autoregressive decoding from text alone.
+        
         Returns ``(B, T, NUM_TOKEN_LAYERS)`` of codec token ids.
         """
         eos_check_every = self.EOS_CHECK_EVERY if eos_check_every is None else eos_check_every
         if eos_check_every < 1:
             raise ValueError(f"eos_check_every must be >= 1, got {eos_check_every}")
+        if temperature < 0.0:
+            raise ValueError(f"temperature must be >= 0, got {temperature}")
+        if top_k < 0:
+            raise ValueError(f"top_k must be >= 0, got {top_k}")
+        greedy = temperature == 0.0
 
         was_training = self.training
         self.eval()
@@ -243,16 +318,43 @@ class EchoAR(nn.Module):
             # Everything before the newest frame is already in the caches, so the
             # decoder only has to run on what was appended since the last step.
             start_pos = x.shape[1] - 1 if caches is not None else 0
-            out = self(
+            h, new_caches = self._trunk(
                 x, context=ctx, text_padding_mask=text_padding_mask,
-                kv_cache=caches, start_pos=start_pos, return_cache=use_cache,
+                kv_cache=caches, start_pos=start_pos,
             )
-            logits, caches = out if use_cache else (out, None)
-            logits = logits[:, -1]                                   # (B, layers, vocab)
-            logits[..., config.prosody_bos] = float("-inf")
-            logits[..., config.prosody_pad] = float("-inf")
+            caches = new_caches if use_cache else None
+            h = h[:, -1:]                                            # (B, 1, hidden_dim)
 
-            nxt = logits.argmax(dim=-1)                              # (B, layers)
+            # Layers of one frame are decoded in sequence, not in parallel: with
+            # intra-frame conditioning on, layer k's head reads the token layer
+            # k - 1 just produced. The decoder is not re-run — only the heads are.
+            frame: list[torch.Tensor] = []
+            cond: Optional[torch.Tensor] = None                      # (B, 1) or None
+            for k in range(self.NUM_TOKEN_LAYERS):
+                logits = self._head(k, h, cond)[:, 0]                # (B, vocab)
+                logits[..., config.prosody_bos] = float("-inf")
+                logits[..., config.prosody_pad] = float("-inf")
+                # The mask token is a training-time input only; never decodable.
+                logits[..., config.prosody_mask] = float("-inf")
+
+                if greedy:
+                    tok = logits.argmax(dim=-1)                      # (B,)
+                else:
+                    logits = logits / temperature
+                    if top_k > 0:
+                        # Everything below the k-th largest logit drops out of the
+                        # draw. Suppressed ids are already -inf and stay there.
+                        kth = logits.topk(
+                            min(top_k, logits.shape[-1]), dim=-1
+                        ).values[:, -1:]                             # (B, 1)
+                        logits = logits.masked_fill(logits < kth, float("-inf"))
+                    tok = torch.multinomial(
+                        logits.softmax(dim=-1), num_samples=1
+                    ).squeeze(1)                                     # (B,)
+                frame.append(tok)
+                cond = tok[:, None]                                  # feeds the next layer
+
+            nxt = torch.stack(frame, dim=1)                          # (B, layers)
             finished = finished | (nxt[:, 0] == config.prosody_eos)
             lengths += (~finished).long()                            # (B,)
 

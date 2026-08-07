@@ -139,6 +139,10 @@ def report_ar() -> None:
     ]
     if model.in_proj is not None:
         components.insert(3, ("Input projection", _count_params(model.in_proj)))
+    if model.film is not None:
+        components.append(
+            (f"Intra-frame FiLM (x{len(model.film)})", _count_params(model.film))
+        )
 
     _print_components(components, total)
 
