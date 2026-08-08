@@ -24,6 +24,8 @@ class TrainingConfig:
     seed: int
     # Classifier-free guidance dropout; only the flow-matching run uses it.
     text_dropout: float = 0.0
+    # Weight of the CTC auxiliary loss; only the autoregressive run uses it.
+    ctc_weight: float = 0.0
 
 
 @dataclass
@@ -121,10 +123,19 @@ class ARModelConfig:
     # assuming the layers are conditionally independent given h.
     head_intra_frame_cond: bool = False
 
+    # Auxiliary CTC head over the decoder states, used at training time only.
+    # ``ctc_upsample`` widens the frame grid before the head: CTC needs at least
+    # one frame per target phoneme, and the 12.5 Hz token grid is *below* the
+    # phoneme rate of natural speech, so on the raw grid the loss is undefined
+    # for nearly every utterance.
+    ctc_enabled: bool = False
+    ctc_upsample: int = 2
+
     # Factory method
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ARModelConfig:
         te, dec, hd = d["text_encoder"], d["decoder"], d["head"]
+        ctc = d.get("ctc", {})
         return cls(
             emb_dim=d["emb_dim"],
             hidden_dim=d["hidden_dim"],
@@ -148,6 +159,8 @@ class ARModelConfig:
             head_hidden_dim=hd["hidden_dim"],
             head_dropout=hd["dropout"],
             head_intra_frame_cond=hd.get("intra_frame_cond", False),
+            ctc_enabled=ctc.get("enabled", False),
+            ctc_upsample=ctc.get("upsample", 2),
         )
 
 

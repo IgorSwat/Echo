@@ -106,7 +106,7 @@ def main() -> None:
     # --- Model --------------------------------------------------------------
     model = EchoAR().to(device)
     ckpt = torch.load(args.model, map_location=device)
-    model.load_state_dict(ckpt.get("model", ckpt))
+    model.load_weights(ckpt.get("model", ckpt))
     model.eval()
 
     tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")

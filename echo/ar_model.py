@@ -155,6 +155,40 @@ class EchoAR(nn.Module):
             for _ in range(self.NUM_TOKEN_LAYERS - 1)
         ]) if cfg.head_intra_frame_cond else None
 
+        # --- Auxiliary CTC head (training only) ---
+        # Cross-entropy is computed against a teacher-forced history, so the
+        # model is never in the state a skipped word creates and the loss cannot
+        # see the skip at all. CTC scores the *whole* frame sequence against the
+        # *whole* phoneme string over every monotonic alignment, so omitting a
+        # phoneme drives the probability of the entire sequence down rather than
+        # costing a handful of frames. To keep that loss low the decoder states
+        # have to carry phoneme identity in order — an implicit pointer into the
+        # text, which is exactly what the token heads need in order not to lose
+        # their place.
+        #
+        # The transposed conv is what makes this computable: CTC needs one frame
+        # per target symbol, and at 12.5 Hz against ~15 phoneme tokens/s the raw
+        # grid is too coarse for 98% of utterances. Stride-``upsample`` with a
+        # matching kernel is non-overlapping, so no padded frame can leak into a
+        # valid one. Both modules are dropped at inference.
+        self.ctc_upsample = cfg.ctc_upsample if cfg.ctc_enabled else 0
+        if cfg.ctc_enabled:
+            if cfg.ctc_upsample < 1:
+                raise ValueError(f"ctc_upsample must be >= 1, got {cfg.ctc_upsample}")
+            self.ctc_up = (
+                nn.ConvTranspose1d(cfg.hidden_dim, cfg.hidden_dim,
+                                   cfg.ctc_upsample, stride=cfg.ctc_upsample)
+                if cfg.ctc_upsample > 1 else None
+            )
+            # One class per text token plus the CTC blank, which takes the index
+            # just past the alphabet.
+            self.ctc_blank = config.text_vocab_size
+            self.ctc_head = nn.Linear(cfg.hidden_dim, config.text_vocab_size + 1)
+        else:
+            self.ctc_up = None
+            self.ctc_head = None
+            self.ctc_blank = None
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -163,6 +197,43 @@ class EchoAR(nn.Module):
         if self.in_proj is not None:
             nn.init.normal_(self.in_proj.weight, mean=0.0, std=config.init_std)
             nn.init.zeros_(self.in_proj.bias)
+        if self.ctc_head is not None:
+            nn.init.normal_(self.ctc_head.weight, mean=0.0, std=config.init_std)
+            nn.init.zeros_(self.ctc_head.bias)
+        if self.ctc_up is not None:
+            nn.init.normal_(self.ctc_up.weight, mean=0.0, std=config.init_std)
+            nn.init.zeros_(self.ctc_up.bias)
+
+    def load_weights(self, state: dict) -> None:
+        """Load a checkpoint, tolerating a missing CTC head but nothing else.
+
+        The CTC branch is a training-time auxiliary that inference never touches,
+        so a checkpoint trained before it existed — or with it disabled — is
+        still a perfectly good model. Every other missing or unexpected key is a
+        real mismatch and still raises.
+        """
+        missing, unexpected = self.load_state_dict(state, strict=False)
+        missing = [k for k in missing if not k.startswith("ctc_")]
+        if missing or unexpected:
+            raise RuntimeError(
+                f"checkpoint does not match the model: "
+                f"missing {missing}, unexpected {unexpected}"
+            )
+
+    def ctc_log_probs(self, h: torch.Tensor) -> torch.Tensor:
+        """Per-frame phoneme log-probabilities for the CTC loss.
+
+        Takes the decoder states from :meth:`_trunk` — ``(B, T, hidden_dim)`` —
+        and returns ``(B, T * ctc_upsample, text_vocab_size + 1)``. The caller
+        scales its frame lengths by :attr:`ctc_upsample` to match.
+        """
+        if self.ctc_head is None:
+            raise RuntimeError("the CTC head is disabled; set ar_model.ctc.enabled in config.json")
+
+        if self.ctc_up is not None:
+            h = self.ctc_up(h.transpose(1, 2)).transpose(1, 2)       # (B, T*u, hidden_dim)
+
+        return self.ctc_head(h).log_softmax(dim=-1)                  # (B, T*u, text_vocab + 1)
 
     def encode_text(
         self,
@@ -249,9 +320,12 @@ class EchoAR(nn.Module):
         start_pos: int = 0,                                         # frames already decoded
         return_cache: bool = False,
         cond_tokens: Optional[torch.Tensor] = None,                 # (B, T, 1) long or None
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, HybridKVCache]]:
+        return_hidden: bool = False,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         """
-        Logits for every frame in `x`; with `return_cache`, the decoder caches too.
+        Logits for every frame in `x`; with `return_cache`, the decoder caches
+        too, and with `return_hidden`, the decoder states the heads read (which
+        is what :meth:`ctc_log_probs` consumes).
         """
         h, caches = self._trunk(
             x, text, padding_mask, text_padding_mask, context, kv_cache, start_pos,
@@ -271,7 +345,13 @@ class EchoAR(nn.Module):
             dim=2,
         )                                                            # (B, T, 2, vocab)
 
-        return (logits, caches) if return_cache else logits
+        if return_cache and return_hidden:
+            return logits, caches, h
+        if return_cache:
+            return logits, caches
+        if return_hidden:
+            return logits, h
+        return logits
 
     @torch.no_grad()
     def generate(

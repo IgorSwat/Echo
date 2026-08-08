@@ -84,8 +84,13 @@ def _ar_loss(
     model: EchoAR,
     batch: dict[str, torch.Tensor],
     device: torch.device,
-) -> torch.Tensor:
-    """Teacher-forced next-token cross-entropy over both codebook layers.
+    ctc_weight: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Teacher-forced next-token cross-entropy, plus the auxiliary CTC term.
+
+    Returns ``(total, cross_entropy, ctc)`` — the two components detached, so
+    the log can show whether an improving total is coming from the model
+    predicting tokens better or merely from the auxiliary head.
 
     The BOS/EOS-wrapped sequence is split into input and target halves shifted
     by one frame, so the model reads frame i and predicts frame i+1: BOS gives
@@ -117,14 +122,65 @@ def _ar_loss(
 
     cond_tokens = targets[..., :-1] if config.ar_model.head_intra_frame_cond else None
 
-    logits = model(inputs, text, input_mask, text_mask,
-                   cond_tokens=cond_tokens)                      # (B, T + 1, 2, V)
+    want_ctc = ctc_weight > 0.0 and config.ar_model.ctc_enabled
+    out = model(inputs, text, input_mask, text_mask,
+                cond_tokens=cond_tokens, return_hidden=want_ctc)
+    logits, hidden = out if want_ctc else (out, None)             # (B, T + 1, 2, V)
 
-    return F.cross_entropy(
+    ce = F.cross_entropy(
         logits.reshape(-1, logits.shape[-1]),
         targets.reshape(-1),
         ignore_index=config.prosody_pad,
     )
+    if not want_ctc:
+        return ce, ce.detach(), torch.zeros((), device=ce.device)
+
+    ctc = _ctc_loss(model, hidden, text, input_mask, text_mask)
+    return ce + ctc_weight * ctc, ce.detach(), ctc.detach()
+
+
+def _ctc_loss(
+    model: EchoAR,
+    hidden: torch.Tensor,                                        # (B, T, hidden_dim)
+    text: torch.Tensor,                                          # (B, S)
+    input_mask: torch.Tensor,                                    # (B, T)
+    text_mask: torch.Tensor,                                     # (B, S)
+) -> torch.Tensor:
+    """Auxiliary CTC: can the phoneme string be read back off the frame states?
+
+    Cross-entropy above is teacher-forced, so it never observes the state a
+    skipped word creates and cannot penalize one. CTC scores the whole frame
+    sequence against the whole phoneme string, summed over every monotonic
+    alignment: a phoneme with nowhere to go collapses the probability of the
+    entire sequence. Keeping it low forces the decoder states to carry phoneme
+    identity *in order*, which is the pointer into the text the token heads need
+    in order not to lose their place.
+
+    ``reduction="mean"`` divides each sample by its target length, putting the
+    result on a per-phoneme scale directly comparable to the token
+    cross-entropy — which is what makes a single fixed weight meaningful.
+    """
+    log_probs = model.ctc_log_probs(hidden)                      # (B, T*u, V + 1)
+    upsample = max(model.ctc_upsample, 1)
+
+    # MPS has no `aten::_ctc_loss`, so the loss itself runs on CPU there. The
+    # copy is differentiable, so gradients still reach the trunk, and only the
+    # log-probs cross the boundary — a few MB per batch, once per step.
+    device = log_probs.device
+    host = torch.device("cpu") if device.type == "mps" else device
+
+    loss = F.ctc_loss(
+        log_probs.transpose(0, 1).to(host),                      # (T*u, B, V + 1), as ctc_loss wants
+        text.to(host),                                           # padded targets, read per length
+        input_lengths=(input_mask.sum(1) * upsample).to(host),
+        target_lengths=text_mask.sum(1).to(host),
+        blank=model.ctc_blank,
+        reduction="mean",
+        # An utterance whose phoneme string still outruns its frames has no
+        # valid alignment and scores inf. Dropping it beats poisoning the batch.
+        zero_infinity=True,
+    )
+    return loss.to(device)
 
 
 def main() -> None:
@@ -144,7 +200,8 @@ def main() -> None:
     # --- Loss log -----------------------------------------------------------
     loss_log = output_dir / "ar_loss_log.csv"
     log_file = open(loss_log, "w", encoding="utf-8")
-    log_file.write("step,epoch,train_loss,val_loss,lr\n")
+    log_file.write("step,epoch,train_loss,val_loss,train_ctc,val_ctc,"
+                   "train_total,val_total,lr\n")
 
     print_header("Echo - Autoregressive Prosody Training")
     print_separator()
@@ -201,6 +258,17 @@ def main() -> None:
     print_info("Parameters", f"{sum(p.numel() for p in model.parameters()):,}")
     print_info("Batch size", str(cfg.batch_size))
     print_info("Total steps", str(total_steps))
+
+    use_ctc = cfg.ctc_weight > 0.0 and config.ar_model.ctc_enabled
+    if use_ctc:
+        print_info("CTC auxiliary", f"weight {cfg.ctc_weight:g}, "
+                                    f"{config.ar_model.ctc_upsample}x upsampled grid "
+                                    f"({12.5 * config.ar_model.ctc_upsample:g} Hz)",
+                   Colors.OKCYAN)
+    elif cfg.ctc_weight > 0.0:
+        print_info("CTC auxiliary", "disabled (ar_model.ctc.enabled is false)", Colors.WARNING)
+    else:
+        print_info("CTC auxiliary", "disabled (ctc_weight is 0)", Colors.WARNING)
     print_separator()
 
     # --- Training loop ------------------------------------------------------
@@ -213,10 +281,14 @@ def main() -> None:
 
     for epoch in range(cfg.num_epochs):
         epoch_train_loss = 0.0
+        epoch_train_ctc = 0.0
+        epoch_train_total = 0.0
         epoch_train_batches = 0
         for batch in train_loader:
-            loss = _ar_loss(model, batch, device)
-            epoch_train_loss += loss.item()
+            loss, ce, ctc = _ar_loss(model, batch, device, cfg.ctc_weight)
+            epoch_train_loss += ce.item()
+            epoch_train_ctc += ctc.item()
+            epoch_train_total += loss.item()
             epoch_train_batches += 1
 
             optimizer.zero_grad(set_to_none=True)
@@ -229,29 +301,53 @@ def main() -> None:
             if step % cfg.log_every == 0:
                 elapsed = time.perf_counter() - t_start
                 lr = scheduler.get_last_lr()[0]
+                # `total` is what the optimizer actually descends. Perplexity
+                # stays on the cross-entropy alone; folding the auxiliary term
+                # into it would make the number meaningless.
                 print_info(
                     f"epoch {epoch + 1}/{cfg.num_epochs} step {step}/{total_steps}",
-                    f"loss {loss.item():.4f} | ppl {math.exp(min(loss.item(), 20)):.1f}"
-                    f" | lr {lr:.2e} | {elapsed / step:.2f}s/it",
+                    (f"total {loss.item():.4f} | ce {ce.item():.4f}" if use_ctc
+                     else f"loss {ce.item():.4f}")
+                    + f" | ppl {math.exp(min(ce.item(), 20)):.1f}"
+                    + (f" | ctc {ctc.item():.4f}" if use_ctc else "")
+                    + f" | lr {lr:.2e} | {elapsed / step:.2f}s/it",
                     Colors.OKGREEN,
                 )
-                log_file.write(f"{step},{epoch + 1},{loss.item():.6f},,{lr:.6e}\n")
+                log_file.write(f"{step},{epoch + 1},{ce.item():.6f},,{ctc.item():.6f},,"
+                               f"{loss.item():.6f},,{lr:.6e}\n")
                 log_file.flush()
 
         # --- Validation -------------------------------------------------------
         if len(val_set) > 0:
             model.eval()
             train_loss_avg = epoch_train_loss / epoch_train_batches
-            val_loss = 0.0
+            # Checkpoints are selected on the cross-entropy alone, not the total.
+            # The CTC term is a means, not the goal, and holding the selection
+            # criterion fixed keeps runs at different ctc_weight values — and the
+            # checkpoints from before this head existed — directly comparable.
+            val_loss, val_ctc, val_total = 0.0, 0.0, 0.0
             with torch.no_grad():
                 for batch in val_loader:
-                    val_loss += _ar_loss(model, batch, device).item()
+                    total, ce, ctc = _ar_loss(model, batch, device, cfg.ctc_weight)
+                    val_loss += ce.item()
+                    val_ctc += ctc.item()
+                    val_total += total.item()
             val_loss /= len(val_loader)
+            val_ctc /= len(val_loader)
+            val_total /= len(val_loader)
+            train_ctc_avg = epoch_train_ctc / epoch_train_batches
+            train_total_avg = epoch_train_total / epoch_train_batches
             model.train()
             lr = scheduler.get_last_lr()[0]
             print_info(f"epoch {epoch + 1}/{cfg.num_epochs} val",
-                       f"loss {val_loss:.4f} (train: {train_loss_avg:.4f})", Colors.WARNING)
-            log_file.write(f"{step},{epoch + 1},{train_loss_avg:.6f},{val_loss:.6f},{lr:.6e}\n")
+                       (f"total {val_total:.4f} (train: {train_total_avg:.4f})"
+                        f" | ce {val_loss:.4f} (train: {train_loss_avg:.4f})"
+                        f" | ctc {val_ctc:.4f} (train: {train_ctc_avg:.4f})") if use_ctc
+                       else f"loss {val_loss:.4f} (train: {train_loss_avg:.4f})",
+                       Colors.WARNING)
+            log_file.write(f"{step},{epoch + 1},{train_loss_avg:.6f},{val_loss:.6f},"
+                           f"{train_ctc_avg:.6f},{val_ctc:.6f},"
+                           f"{train_total_avg:.6f},{val_total:.6f},{lr:.6e}\n")
             log_file.flush()
 
             if val_loss < best_val_loss:
@@ -280,7 +376,9 @@ def main() -> None:
     torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                 "step": step, "epoch": cfg.num_epochs, "val_loss": val_loss}, ckpt)
     print_separator()
-    print_info("Best val loss", f"{best_val_loss:.6f}", Colors.OKCYAN)
+    print_info("Best val loss", f"{best_val_loss:.6f}"
+                               + (" (cross-entropy; checkpoints are selected on it)"
+                                  if use_ctc else ""), Colors.OKCYAN)
     print_info("Final checkpoint", str(ckpt), Colors.OKCYAN)
     print_info("Total time", f"{time.perf_counter() - t_start:.1f}s", Colors.OKCYAN)
     log_file.close()

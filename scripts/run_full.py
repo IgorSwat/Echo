@@ -135,7 +135,12 @@ def _load_checkpoint(model: torch.nn.Module, path: str, device: torch.device, wh
     ckpt = torch.load(path, map_location=device)
     state = ckpt.get("model", ckpt)
     try:
-        model.load_state_dict(state)
+        # EchoAR carries a training-only CTC head that inference never runs, so
+        # it knows how to accept a checkpoint saved without one.
+        if hasattr(model, "load_weights"):
+            model.load_weights(state)
+        else:
+            model.load_state_dict(state)
     except RuntimeError as e:
         hint = ""
         if any("theta" in k for k in list(state) + [n for n, _ in model.named_parameters()]):

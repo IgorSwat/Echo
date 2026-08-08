@@ -415,7 +415,7 @@ def main() -> None:
     # --- Models -------------------------------------------------------------
     ckpt = torch.load(args.model, map_location=device)
     ar_model = EchoAR().to(device)
-    ar_model.load_state_dict(ckpt.get("model", ckpt))
+    ar_model.load_weights(ckpt.get("model", ckpt))
     ar_model.eval()
     if isinstance(ckpt, dict) and "epoch" in ckpt:
         print_info("Trained", f"epoch {ckpt['epoch']}, "

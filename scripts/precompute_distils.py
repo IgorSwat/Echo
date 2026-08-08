@@ -251,7 +251,7 @@ def main() -> None:
 
         ckpt = torch.load(ckpt_path, map_location="cpu")
         ar_model = EchoAR().to(device)
-        ar_model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt)
+        ar_model.load_weights(ckpt["model"] if "model" in ckpt else ckpt)
         ar_model.eval()
         tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")
         phoneme_map = _load_phoneme_map(phonemes_csv)
