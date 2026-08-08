@@ -272,7 +272,13 @@
       "save_every": 2,
       "early_stop": 5,
       "seed": 42,
-      "ctc_weight": 0.2
+      "ctc_weight": 0.2,
+      "history_mask_max": 0.15,
+      "history_mask_start_epoch": 3,
+      "history_mask_step": 0.03,
+      "history_mask_span_min": 2,
+      "history_mask_span_max": 5,
+      "history_mask_token_frac": 0.33
     },
     "shortcut": {
       "data_dir": "data/ljspeech",

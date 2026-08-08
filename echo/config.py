@@ -27,6 +27,23 @@ class TrainingConfig:
     # Weight of the CTC auxiliary loss; only the autoregressive run uses it.
     ctc_weight: float = 0.0
 
+    # History corruption for the autoregressive run: from
+    # ``history_mask_start_epoch`` onwards, a growing fraction of the *input*
+    # frames is replaced before the model reads them, so it learns to recover
+    # from a history that is not ground truth. ``history_mask_max`` of 0
+    # disables the whole schedule.
+    history_mask_max: float = 0.0
+    history_mask_start_epoch: int = 1
+    history_mask_step: float = 0.02
+    # Corruption comes in contiguous runs: isolated frames are trivially
+    # interpolated from their neighbours, while real drift arrives in bursts.
+    history_mask_span_min: int = 2
+    history_mask_span_max: int = 5
+    # Share of corrupted frames that become the mask token; the rest are
+    # replaced by random codec tokens, which is what an AR error actually looks
+    # like — a plausible wrong frame rather than a flag saying "ignore me".
+    history_mask_token_frac: float = 0.3
+
 
 @dataclass
 class TrainingSections:

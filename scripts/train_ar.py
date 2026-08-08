@@ -80,11 +80,95 @@ def _add_bos_eos(
     return seq, seq_mask                                         # (B, T + 2, L), (B, T + 2)
 
 
+def _mask_rate(epoch: int, cfg) -> float:
+    """Fraction of history frames to corrupt in ``epoch`` (1-based).
+
+    Zero until ``history_mask_start_epoch``, then one ``history_mask_step``
+    more per epoch up to ``history_mask_max``. Ramped rather than switched on
+    because early in training the model cannot predict a clean history yet, and
+    corrupting one then is noise added to an already-hard task.
+    """
+    if cfg.history_mask_max <= 0.0 or epoch < cfg.history_mask_start_epoch:
+        return 0.0
+    steps = epoch - cfg.history_mask_start_epoch + 1
+    return min(cfg.history_mask_max, steps * cfg.history_mask_step)
+
+
+def _corrupt_history(
+    inputs: torch.Tensor,                                        # (B, T, 2) long
+    valid: torch.Tensor,                                         # (B, T) bool
+    rate: float,
+    cfg,
+) -> tuple[torch.Tensor, float]:
+    """Replace a fraction of the *input* frames, leaving the targets untouched.
+
+    Teacher forcing hands the model a history it will never have at inference:
+    its own frames, errors included. Corrupting the input teaches it to keep
+    going when the history is wrong instead of compounding the error — the
+    other half of the problem the CTC head addresses, which supplies the text
+    pointer the model falls back on when the acoustic history stops being
+    trustworthy.
+
+    Corruption arrives in contiguous spans, and most of it is *plausible wrong
+    tokens* rather than the mask symbol: at inference the history is never a
+    mask, it is a frame the model got wrong, and that is the situation worth
+    rehearsing. Both token layers of a chosen frame are replaced together,
+    since a real error corrupts the whole frame.
+
+    BOS at position 0 is never touched — it is the anchor the sequence starts
+    from — and neither is anything outside ``valid``.
+
+    Returns the corrupted copy and the fraction of valid frames it actually hit.
+    """
+    if rate <= 0.0:
+        return inputs, 0.0
+
+    B, T, L = inputs.shape
+    device = inputs.device
+    span_min, span_max = cfg.history_mask_span_min, cfg.history_mask_span_max
+    mean_span = (span_min + span_max) / 2.0
+
+    # Spans are drawn by their start, so the per-start probability has to be
+    # divided by the mean span length for the *covered* fraction to come out
+    # at `rate`.
+    starts = torch.rand(B, T, device=device) < (rate / mean_span)
+    starts &= valid
+    starts[:, 0] = False                                         # never the BOS frame
+
+    lengths = torch.randint(span_min, span_max + 1, (B, T), device=device)
+    corrupt = torch.zeros(B, T, dtype=torch.bool, device=device)
+    # Grow each start forward by its own length: at most span_max cheap shifts,
+    # which keeps per-span random lengths without a Python loop over spans.
+    for offset in range(span_max):
+        active = starts & (lengths > offset)
+        if offset:
+            active = torch.cat(
+                [torch.zeros(B, offset, dtype=torch.bool, device=device), active[:, :-offset]],
+                dim=1,
+            )
+        corrupt |= active
+    corrupt &= valid                                             # never past the sequence
+
+    out = inputs.clone()
+    # Most corrupted frames get a random real token; a minority get the mask
+    # symbol, which the model may read but `generate` can never emit.
+    use_mask = torch.rand(B, T, device=device) < cfg.history_mask_token_frac
+    random_tokens = torch.randint(0, EchoAR.CODEBOOK_SIZE, (B, T, L), device=device)
+    replacement = torch.where(
+        use_mask.unsqueeze(-1), torch.full_like(random_tokens, config.prosody_mask), random_tokens
+    )
+    out = torch.where(corrupt.unsqueeze(-1), replacement, out)
+
+    hit = float(corrupt.sum()) / max(float(valid.sum()), 1.0)
+    return out, hit
+
+
 def _ar_loss(
     model: EchoAR,
     batch: dict[str, torch.Tensor],
     device: torch.device,
     ctc_weight: float = 0.0,
+    mask_rate: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Teacher-forced next-token cross-entropy, plus the auxiliary CTC term.
 
@@ -119,6 +203,13 @@ def _ar_loss(
     # that carry a supervised prediction: BOS plus every real frame, stopping
     # short of the EOS itself (which is only ever a target, never read).
     input_mask = seq_mask[:, 1:]                                 # (B, T + 1)
+
+    # Only the history the model *reads* is corrupted. The targets stay clean —
+    # the model is asked to predict the true next frame despite a damaged
+    # history, which is the whole point — and so do `cond_tokens`, which are
+    # intra-frame teacher forcing along the codebook axis, not history.
+    if mask_rate > 0.0:
+        inputs, _ = _corrupt_history(inputs, input_mask, mask_rate, config.training.ar)
 
     cond_tokens = targets[..., :-1] if config.ar_model.head_intra_frame_cond else None
 
@@ -269,6 +360,17 @@ def main() -> None:
         print_info("CTC auxiliary", "disabled (ar_model.ctc.enabled is false)", Colors.WARNING)
     else:
         print_info("CTC auxiliary", "disabled (ctc_weight is 0)", Colors.WARNING)
+
+    if cfg.history_mask_max > 0.0:
+        peak = cfg.history_mask_start_epoch + int(
+            math.ceil(cfg.history_mask_max / cfg.history_mask_step)
+        ) - 1
+        print_info("History masking",
+                   f"from epoch {cfg.history_mask_start_epoch}, "
+                   f"+{cfg.history_mask_step:.1%}/epoch up to {cfg.history_mask_max:.1%} "
+                   f"(reached at epoch {peak})", Colors.OKCYAN)
+    else:
+        print_info("History masking", "disabled (history_mask_max is 0)", Colors.WARNING)
     print_separator()
 
     # --- Training loop ------------------------------------------------------
@@ -284,8 +386,14 @@ def main() -> None:
         epoch_train_ctc = 0.0
         epoch_train_total = 0.0
         epoch_train_batches = 0
+        mask_rate = _mask_rate(epoch + 1, cfg)
+        if mask_rate > 0.0:
+            print_info(f"epoch {epoch + 1}/{cfg.num_epochs} history masking",
+                       f"{mask_rate:.1%} of frames "
+                       f"(spans of {cfg.history_mask_span_min}-{cfg.history_mask_span_max})",
+                       Colors.OKCYAN)
         for batch in train_loader:
-            loss, ce, ctc = _ar_loss(model, batch, device, cfg.ctc_weight)
+            loss, ce, ctc = _ar_loss(model, batch, device, cfg.ctc_weight, mask_rate)
             epoch_train_loss += ce.item()
             epoch_train_ctc += ctc.item()
             epoch_train_total += loss.item()
@@ -325,6 +433,10 @@ def main() -> None:
             # The CTC term is a means, not the goal, and holding the selection
             # criterion fixed keeps runs at different ctc_weight values — and the
             # checkpoints from before this head existed — directly comparable.
+            # Validation runs on a clean history whatever the training schedule
+            # is doing, so val CE keeps meaning one fixed thing: it stays
+            # comparable across mask rates, across ctc_weight values, and
+            # against checkpoints trained before either existed.
             val_loss, val_ctc, val_total = 0.0, 0.0, 0.0
             with torch.no_grad():
                 for batch in val_loader:
