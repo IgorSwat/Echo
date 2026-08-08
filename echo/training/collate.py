@@ -42,8 +42,10 @@ def collate_fn(
         codec_key_padding_mask        — ``(B, T_c)``     bool
 
     Latents and codec tokens sit on different frame rates, so each gets its own
-    padded length; ``latent`` and ``distil`` share one temporal grid because the
-    model consumes them together.
+    padded length. ``latent`` and ``distil`` share one temporal grid because the
+    model consumes them together: both are truncated to the shorter of the two
+    per sample, and ``latent_key_padding_mask`` and ``distil_key_padding_mask``
+    are the same mask.
     """
     fields = batch[0].keys()
     B = len(batch)
@@ -68,23 +70,22 @@ def collate_fn(
         for name in ("latent", "distil") if name in fields
     }
     if frames:
-        lengths = {
-            name: torch.tensor([f.size(0) for f in seqs], dtype=torch.long)
-            for name, seqs in frames.items()
-        }
-        T = int(max(int(l.max()) for l in lengths.values()))
-        # Round up to the nearest multiple of 8 so the U-Net's 3 stride-2 downsamples
-        # and exact-doubling upsamples perfectly reconstruct the temporal length.
-        T = ((T + 7) // 8) * 8
+        lengths = torch.tensor(
+            [min(seqs[i].size(0) for seqs in frames.values()) for i in range(B)],
+            dtype=torch.long,
+        )
+        T = int(lengths.max())
 
+        mask = _mask(lengths, T)
         for name, seqs in frames.items():
             C = seqs[0].size(-1)
             padded = torch.zeros((B, T, C), dtype=torch.float32)
             for i, f in enumerate(seqs):
-                padded[i, : f.size(0)] = f
+                n = int(lengths[i])
+                padded[i, :n] = f[:n]
 
             out[name] = padded
-            out[f"{name}_key_padding_mask"] = _mask(lengths[name], T)
+            out[f"{name}_key_padding_mask"] = mask
 
     # --- Codec tokens ---
     if "codec" in fields:

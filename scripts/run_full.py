@@ -107,6 +107,30 @@ def _timed(name: str, device: torch.device, into: dict[str, float]):
     into[name] = time.perf_counter() - t0
 
 
+def _lowpass(audio: torch.Tensor, cutoff: float, sample_rate: int) -> torch.Tensor:
+    """Zero-phase low-pass at ``cutoff`` Hz, leaving the sample rate untouched.
+
+    This is a filter, not a resample: the waveform stays at ``sample_rate`` and
+    keeps every sample, only the content above ``cutoff`` is removed.
+
+    It exists because the source corpus is band-limited well below BlueCodec's
+    22 kHz Nyquist — LJSpeech is a 24 kHz recording, so nothing above 12 kHz is
+    real. The codec is a 44.1 kHz model and its decoder fills that empty top
+    band with broadband noise anyway (~0.3% of output energy, against a
+    reference that measures zero there), which is audible as a sizzle riding on
+    the speech. Filtering it out costs a few tenths of a percent of in-band
+    energy and removes essentially all of the fabricated band.
+
+    ``sosfiltfilt`` runs the filter forwards and backwards, so the result has no
+    group delay — the trims applied around this step stay sample-accurate.
+    """
+    from scipy.signal import butter, sosfiltfilt                   # scipy arrives with librosa
+
+    sos = butter(8, cutoff / (sample_rate / 2), btype="low", output="sos")
+    filtered = sosfiltfilt(sos, audio.numpy(), axis=-1).copy()     # negative strides -> copy
+    return torch.from_numpy(filtered).float()
+
+
 def _load_checkpoint(model: torch.nn.Module, path: str, device: torch.device, what: str) -> None:
     ckpt = torch.load(path, map_location=device)
     state = ckpt.get("model", ckpt)
@@ -163,6 +187,11 @@ def main() -> None:
     parser.add_argument("--cut_last", "--cut-last", type=float, default=0.0, metavar="MS",
                         help="Trim this many milliseconds off the end of the output audio "
                              "(default: 0). The last frames often carry a codec edge artifact.")
+    parser.add_argument("--lowpass", type=float, default=0.0, metavar="HZ",
+                        help="Low-pass the output at this frequency (default: 0 = off). The "
+                             "sample rate is unchanged — this only removes content above HZ. "
+                             "For a 24 kHz source corpus try 11500: nothing above 12 kHz is "
+                             "real, and BlueCodec (a 44.1 kHz model) fabricates noise there.")
     parser.add_argument("--save-intermediate", action="store_true",
                         help="Also write the AR/Mimi stage as <output stem>_ar.wav.")
     parser.add_argument("--output", type=str, default="output.wav", help="Output audio path.")
@@ -177,6 +206,11 @@ def main() -> None:
         parser.error("--temperature must be >= 0 (0 selects greedy decoding)")
     if args.top_k < 0:
         parser.error("--top-k must be >= 0 (0 disables top-k)")
+    if args.lowpass < 0:
+        parser.error("--lowpass must be >= 0 (0 disables the filter)")
+    if args.lowpass >= _BLUE_SR / 2:
+        parser.error(f"--lowpass must be below the {_BLUE_SR // 2} Hz Nyquist frequency, "
+                     f"got {args.lowpass:g}")
 
     # BlueCodec's STFT reuses an `out` tensor that torch resizes on the first
     # call; the deprecation notice is internal to the codec and says nothing
@@ -246,6 +280,7 @@ def main() -> None:
     print_info("Steps", str(args.steps))
     print_info("Solver", args.solver)
     print_info("CFG scale", str(args.cfg))
+    print_info("Low-pass", f"{args.lowpass:g} Hz" if args.lowpass > 0 else "off")
     if stats is not None:
         print_info("Latent norm", f"enabled ({stats_path})", Colors.OKCYAN)
     else:
@@ -340,6 +375,15 @@ def main() -> None:
                 f"({1000 * audio.shape[-1] / _BLUE_SR:.0f} ms)"
             )
         audio = audio[..., :-cut_samples]
+
+    # Band-limit last, on the finished waveform: the trims above are the only
+    # steps that care about sample positions, and this one preserves them.
+    if args.lowpass > 0:
+        before = float(audio.pow(2).sum())
+        audio = _lowpass(audio, args.lowpass, _BLUE_SR)
+        removed = 1.0 - float(audio.pow(2).sum()) / max(before, 1e-12)
+        print_info("Low-pass", f"{args.lowpass:g} Hz  ({100 * removed:.2f}% of energy removed, "
+                               f"sample rate unchanged)", Colors.OKCYAN)
 
     saved_duration = audio.shape[-1] / _BLUE_SR
 
