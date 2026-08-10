@@ -3,18 +3,12 @@
 
 Chains the two models. EchoAR writes a Mimi token grid from the phoneme string
 alone, Mimi decodes it to a coarse 24 kHz waveform, BlueCodec re-encodes that
-into a distil latent, and EchoFM generates the data latent from noise with that
-distil as conditioning — exactly the transport it was trained on, only with the
-conditioning synthesised instead of read from disk.
+into a distil latent, and EchoFM flows from the distil latent to the data
+distribution — exactly the ``distil -> data`` transport it was trained on, only
+with the distil side synthesised instead of read from disk.
 
     text -> EchoAR -> Mimi.decode -> resample -> BlueCodec.encode
          -> EchoFM (ODE) -> BlueCodec.decode -> audio
-
-``--init`` decides what the ODE starts from. ``noise`` is what EchoFM was
-trained on. ``distil`` (the default here) starts the integration at the AR
-stage's own latent instead, so the flow refines the AR output rather than
-generating a fresh sample from it — pair it with ``--start-t`` to tell the model
-how far along that starting state already is.
 
 With ``--shortcut-model`` the middle stage is replaced by EchoShortcut, which
 maps the token grid straight to a distil latent and skips both codecs:
@@ -190,18 +184,6 @@ def main() -> None:
                              "'midpoint' (RK2, 2 evals/step, better at few steps).")
     parser.add_argument("--cfg", type=float, default=3.0,
                         help="Classifier-free guidance scale (default: 3.0; 1.0 disables guidance).")
-    parser.add_argument("--init", choices=("distil", "noise"), default="distil",
-                        help="What the flow-matching integration starts from. 'distil' (default) "
-                             "starts at the AR stage's own latent, so the ODE refines the AR "
-                             "output rather than building a sample from scratch; 'noise' is the "
-                             "Gaussian start the model was trained with. Either way the distil "
-                             "is also passed as conditioning.")
-    parser.add_argument("--start-t", type=float, default=0.0, metavar="T",
-                        help="Skip the schedule below T, treating the starting state as already "
-                             "T of the way to the data (default: 0 = integrate the whole path). "
-                             "Only meaningful with --init distil: the AR latent is not noise, so "
-                             "starting it at t=0 tells the model it is further from the data than "
-                             "it really is. Try 0.3-0.6.")
     parser.add_argument(
         "--stats", type=str, default=None,
         help="Path to latent_stats.npz (mean/std) used to normalize/denormalize latents. "
@@ -234,11 +216,6 @@ def main() -> None:
     if args.lowpass >= _BLUE_SR / 2:
         parser.error(f"--lowpass must be below the {_BLUE_SR // 2} Hz Nyquist frequency, "
                      f"got {args.lowpass:g}")
-    if not 0.0 <= args.start_t < 1.0:
-        parser.error(f"--start-t must be in [0, 1), got {args.start_t}")
-    if args.start_t > 0.0 and args.init == "noise":
-        parser.error("--start-t only makes sense with --init distil: from pure noise the "
-                     "state really is at t=0 and skipping the early schedule just breaks it")
 
     # BlueCodec's STFT reuses an `out` tensor that torch resizes on the first
     # call; the deprecation notice is internal to the codec and says nothing
@@ -307,14 +284,6 @@ def main() -> None:
         print_info("AR decoding", "greedy (argmax)")
     print_info("Steps", str(args.steps))
     print_info("Solver", args.solver)
-    if args.init == "distil":
-        print_info("FM start", f"AR distil latent"
-                               + (f", schedule from t={args.start_t:g}" if args.start_t else
-                                  ", full schedule from t=0")
-                               + "  (the model was trained from noise; this is an experiment)",
-                   Colors.WARNING)
-    else:
-        print_info("FM start", "Gaussian noise (as trained)", Colors.OKCYAN)
     print_info("CFG scale", str(args.cfg))
     print_info("Low-pass", f"{args.lowpass:g} Hz" if args.lowpass > 0 else "off")
     if config.latent_norm == "instance":
@@ -401,15 +370,10 @@ def main() -> None:
     print_info("Distil latent", f"{tuple(distil.shape)}  ({distil.shape[1] / (_BLUE_SR / _BLUE_HOP):.2f}s)")
     print_info("Time", f"{timings['codec']:.3f}s")
 
-    # --- Stage 3: starting state -> data latent (distil conditions it) -------
+    # --- Stage 3: distil latent -> data latent -> audio ----------------------
     print_section("Stage 3 — EchoFM")
-    # With --init distil the ODE starts at the AR stage's own latent instead of
-    # noise, so the run refines what the AR produced rather than resynthesizing
-    # it. The distil is still passed as conditioning either way.
-    init_state = distil if args.init == "distil" else None
     with _timed("fm", device, timings):
-        latent = _generate(fm_model, text_ids, distil, args.steps, args.cfg, args.solver,
-                           x0=init_state, start_t=args.start_t)
+        latent = _generate(fm_model, text_ids, distil, args.steps, args.cfg, args.solver)
     if stats is not None:
         mean, std = stats
         latent = latent * std + mean

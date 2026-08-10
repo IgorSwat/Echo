@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Generate audio with a trained Echo flow-matching model.
 
-The model is trained with conditional flow matching from noise
-(``x_t = (1 - t) * noise + t * data``, velocity target ``data - noise``) with the
-distil latent supplied as *conditioning*, so sampling starts from fresh Gaussian
-noise shaped like that distil and solves the ODE
-``dx/dt = v(x, t | distil, text)`` up to ``t = 1`` with a proper numerical integrator
+The model is trained with conditional flow matching
+(``x_t = (1 - t) * distil + t * data``, velocity target ``data - distil``), so
+sampling starts from the provided distil latent at ``t = 0`` and solves the ODE
+``dx/dt = v(x, t)`` up to ``t = 1`` with a proper numerical integrator
 (``--solver euler`` or the second-order ``--solver midpoint``/RK2).
 The resulting audio latent is decoded to a waveform with BlueCodec.
 
@@ -70,21 +69,17 @@ def _velocity(
     x: torch.Tensor,
     t: torch.Tensor,
     cfg_scale: float,
-    distil: torch.Tensor,
 ) -> torch.Tensor:
     """One velocity evaluation at (x, t), with classifier-free guidance.
 
     With ``cfg_scale != 1`` the model runs batch-doubled (conditioned +
     null-text) and extrapolates: v = v_uncond + cfg * (v_cond - v_uncond).
-    Only the *text* is dropped: the distil conditioning is what fixes the
-    timing and content of the utterance, and guidance is not meant to push
-    away from it.
     """
     if cfg_scale == 1.0:
-        return model(text_ids, x, t, distil)
+        return model(text_ids, x, t)
     drop = torch.tensor([False, True], device=x.device)
     v2 = model(text_ids.repeat(2, 1), x.repeat(2, 1, 1), t.repeat(2),
-               distil.repeat(2, 1, 1), None, None, drop)
+               None, None, drop)
     return v2[1:2] + cfg_scale * (v2[0:1] - v2[1:2])
 
 
@@ -92,56 +87,34 @@ def _velocity(
 def _generate(
     model: EchoFM,
     text_ids: torch.Tensor,
-    distil: torch.Tensor,
+    x0: torch.Tensor,
     steps: int,
     cfg_scale: float,
     solver: str,
-    generator: Optional[torch.Generator] = None,
-    x0: Optional[torch.Tensor] = None,
-    start_t: float = 0.0,
 ) -> torch.Tensor:
-    """Integrate the velocity field from t=``start_t`` to t=1 (data).
+    """Integrate the velocity field from t=0 (distil) to t=1 (data).
 
-    ``distil`` is the conditioning, not the starting point: by default the state
-    starts as fresh Gaussian noise shaped like it, so two calls on the same
-    distil give two different renderings of the same utterance. Pass
-    ``generator`` to make a run reproducible.
+    ``x0`` is the distil latent — the starting state of the transport, which is
+    what the model was trained on. The run is deterministic: the same distil
+    always gives the same output.
 
-    ``x0`` overrides that starting state — pass the distil itself to run the
-    transport the way the earlier, distil-as-source model did. Note this is not
-    what the current model was trained for: it learned a field over states drawn
-    from the noise-to-data path, and the distil sits somewhere off that path, so
-    the trajectory starts out of distribution. It is an experiment, not the
-    supported route.
-
-    ``start_t`` skips the early part of the schedule, which only makes sense
-    together with ``x0``: a state that is already partway to the data should be
-    integrated from where it actually sits, not from t=0. At ``start_t=0.4`` the
-    model is told "this is a 40%-complete sample, finish it".
-
-    ``euler``    -- x <- x + v(x, t_i) * dt; the canonical flow-matching sampler
-                    (1 model evaluation per step).
+    ``euler``    -- x <- x + v(x, t_i) * dt with t_i = i / steps; the canonical
+                    flow-matching sampler (1 model evaluation per step).
     ``midpoint`` -- explicit midpoint (RK2): predict the state at t_i + dt/2
                     with an Euler half-step, then advance using the velocity
                     evaluated there (2 model evaluations per step).
     """
-    if not 0.0 <= start_t < 1.0:
-        raise ValueError(f"start_t must be in [0, 1), got {start_t}")
-
-    x = (torch.randn(distil.shape, device=distil.device, dtype=distil.dtype,
-                     generator=generator) if x0 is None else x0.clone())
-
-    span = 1.0 - start_t
-    dt = span / steps
+    dt = 1.0 / steps
+    x = x0
     for i in range(steps):
-        t0 = torch.full((1,), start_t + i * dt, device=text_ids.device)
+        t0 = torch.full((1,), i / steps, device=text_ids.device)
         if solver == "euler":
-            x = x + dt * _velocity(model, text_ids, x, t0, cfg_scale, distil)
+            x = x + dt * _velocity(model, text_ids, x, t0, cfg_scale)
         else:                                                             # midpoint (RK2)
-            v1 = _velocity(model, text_ids, x, t0, cfg_scale, distil)
+            v1 = _velocity(model, text_ids, x, t0, cfg_scale)
             x_mid = x + 0.5 * dt * v1
-            t_mid = torch.full((1,), start_t + (i + 0.5) * dt, device=text_ids.device)
-            x = x + dt * _velocity(model, text_ids, x_mid, t_mid, cfg_scale, distil)
+            t_mid = torch.full((1,), (i + 0.5) / steps, device=text_ids.device)
+            x = x + dt * _velocity(model, text_ids, x_mid, t_mid, cfg_scale)
     return x                                                              # (1, T, C)
 
 
@@ -194,8 +167,8 @@ def _generate_one(
     output_path: Path,
 ) -> None:
     text_ids = torch.tensor([tokenizer.tokenize(text)], dtype=torch.long, device=device)
-    cond = distil.unsqueeze(0)  # (1, T, C), conditioning — the flow starts from noise
-    latent = _generate(model, text_ids, cond, steps, cfg_scale, solver)  # (1, T, C)
+    x0 = distil.unsqueeze(0)  # (1, T, C) — the transport starts here
+    latent = _generate(model, text_ids, x0, steps, cfg_scale, solver)  # (1, T, C)
     if stats is not None:
         mean, std = stats
         latent = latent * std + mean
@@ -223,7 +196,7 @@ def main() -> None:
     parser.add_argument("--text", type=str, default=None,
                         help="Raw text to synthesize (phonemized with eSpeak).")
     parser.add_argument("--distil", type=str, default=None,
-                        help="Path to a .npz file with the conditioning distil latent (shape (C, T)). It sets the length and carries the timing; the flow itself starts from noise.")
+                        help="Path to a .npz file with the starting distil latent (shape (C, T)).")
     parser.add_argument("--test-suite", type=str, default=None,
                         help="Path to a phonemes CSV file (e.g. phonemes_test.csv) for batch generation.")
     parser.add_argument("--steps", type=int, default=8, help="Flow-matching integration steps (default: 8).")
