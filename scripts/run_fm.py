@@ -2,8 +2,9 @@
 """Generate audio with a trained Echo flow-matching model.
 
 The model is trained with conditional flow matching
-(``x_t = (1 - t) * distil + t * data``, velocity target ``data - distil``), so
-sampling starts from the provided distil latent at ``t = 0`` and solves the ODE
+(``x_t = (1 - t) * x0 + t * data`` with ``x0 = distil + sigma * noise``, velocity
+target ``data - x0``), so sampling starts from the dithered distil latent at
+``t = 0`` and solves the ODE
 ``dx/dt = v(x, t)`` up to ``t = 1`` with a proper numerical integrator
 (``--solver euler`` or the second-order ``--solver midpoint``/RK2).
 The resulting audio latent is decoded to a waveform with BlueCodec.
@@ -91,12 +92,14 @@ def _generate(
     steps: int,
     cfg_scale: float,
     solver: str,
+    generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
-    """Integrate the velocity field from t=0 (distil) to t=1 (data).
+    """Integrate the velocity field from t=0 (dithered distil) to t=1 (data).
 
-    ``x0`` is the distil latent — the starting state of the transport, which is
-    what the model was trained on. The run is deterministic: the same distil
-    always gives the same output.
+    ``x0`` is the distil latent — the starting state of the transport. It is
+    dithered by ``config.fm_model.source_noise`` exactly as in training, so the
+    run is *stochastic*: the same distil gives a different rendering each time,
+    which is where the acoustic detail comes from. Pass ``generator`` to pin it.
 
     ``euler``    -- x <- x + v(x, t_i) * dt with t_i = i / steps; the canonical
                     flow-matching sampler (1 model evaluation per step).
@@ -105,7 +108,9 @@ def _generate(
                     evaluated there (2 model evaluations per step).
     """
     dt = 1.0 / steps
-    x = x0
+    sigma = config.fm_model.source_noise
+    x = x0 if sigma <= 0.0 else x0 + sigma * torch.randn(
+        x0.shape, device=x0.device, dtype=x0.dtype, generator=generator)
     for i in range(steps):
         t0 = torch.full((1,), i / steps, device=text_ids.device)
         if solver == "euler":

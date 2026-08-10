@@ -58,11 +58,20 @@ def _flow_matching_loss(
     device: torch.device,
     text_dropout_p: float = 0.0,
 ) -> torch.Tensor:
-    """Interpolate between distil x0 and data x1; predict the velocity x1 - x0.
+    """Interpolate between a dithered distil x0 and data x1; predict x1 - x0.
 
     The distil is the starting state of the transport, not a side input: the
     model is handed the AR stage's own latent and has to carry it to the data
     distribution.
+
+    ``config.fm_model.source_noise`` dithers that starting state —
+    ``x0 = distil + sigma * eps``, fresh noise every step. Without it the source
+    is a deterministic function of the target, and the L2-optimal velocity is
+    then the mean of every rendering consistent with that distil: measurably
+    blurry output, and it gets worse the longer the model trains. The dither is
+    the seed that lets detail be *sampled* instead of averaged. Sigma is chosen
+    to cover the spread the distil cannot predict (~0.87 here) without drowning
+    the information it carries (sigma 0.5 keeps ~96% of it).
 
     With probability ``text_dropout_p`` (per sample), the text conditioning is
     replaced by the model's learned null-text condition, enabling
@@ -71,6 +80,9 @@ def _flow_matching_loss(
     text = batch["text"].to(device)
     x1 = batch["latent"].to(device)
     x0 = batch["distil"].to(device)
+    sigma = config.fm_model.source_noise
+    if sigma > 0.0:
+        x0 = x0 + sigma * torch.randn_like(x0)
     text_mask = batch["text_key_padding_mask"].to(device)
     latent_mask = batch["latent_key_padding_mask"].to(device)
     t = torch.rand(x1.shape[0], device=device)
@@ -154,6 +166,11 @@ def main() -> None:
     print_section("Setup")
     print_info("Device", str(device), Colors.OKCYAN)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
+    print_info("Source noise",
+               f"sigma {config.fm_model.source_noise:g}  (x0 = distil + sigma * eps)"
+               if config.fm_model.source_noise > 0 else
+               "0 — deterministic pairing; the L2 optimum is the conditional mean (blur)",
+               Colors.OKCYAN if config.fm_model.source_noise > 0 else Colors.WARNING)
     if config.latent_norm == "instance":
         print_info("Latent normalization",
                    "per instance (each utterance by its own distil's channel stats; "

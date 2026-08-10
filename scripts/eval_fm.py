@@ -144,6 +144,9 @@ def main() -> None:
                         help="EchoAR checkpoint used to build the pipeline conditioning.")
     parser.add_argument("--tag", type=str, default=None,
                         help="Short name for this result (default: the checkpoint stem).")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Seeds the source dither, so a run is reproducible (the transport "
+                             "is stochastic whenever fm_model.source_noise > 0).")
     parser.add_argument("--num-files", type=int, default=12,
                         help="Val-split utterances to score (default: 12).")
     parser.add_argument("--norm", choices=("dataset", "instance"), default=None,
@@ -182,6 +185,8 @@ def main() -> None:
     print_info("Checkpoint", args.model, Colors.OKCYAN)
     print_info("Tag", tag)
     print_info("Device", str(device))
+    print_info("Source noise", f"sigma {config.fm_model.source_noise:g}"
+               + ("" if config.fm_model.source_noise > 0 else "  (deterministic transport)"))
     print_info("Normalization", f"{norm}"
                + ("" if args.norm else "  (from config; pass --norm if the checkpoint differs)"),
                Colors.OKCYAN if args.norm else Colors.WARNING)
@@ -280,8 +285,9 @@ def main() -> None:
                     target_pool.append(_feats(tgt[0, :T].cpu().numpy()))
 
                 for spec in _CONFIGS:
+                    gen = torch.Generator(device=device).manual_seed(args.seed)
                     out = _generate(fm, text_ids, cond, spec["steps"], spec["cfg"],
-                                    spec.get("solver", "euler"))
+                                    spec.get("solver", "euler"), generator=gen)
                     wav = blue.decode((out * s + m).transpose(1, 2)).reshape(-1)
                     wav = wav.float().cpu().numpy()
                     if src == "ar":                      # trim to what the AR actually produced
@@ -337,6 +343,8 @@ def main() -> None:
         "ar_checkpoint": args.ar_model,
         "epoch": ckpt.get("epoch"), "val_loss": ckpt.get("val_loss"),
         "normalization": norm,
+        "source_noise": config.fm_model.source_noise,
+        "seed": args.seed,
         "num_files": len(files), "files": [r["stem"] for r in per_file],
         "sampler_configs": _CONFIGS,
         "git_commit": _git_commit(),
@@ -360,29 +368,67 @@ def main() -> None:
 
 
 def _print_comparison(paths: list[str]) -> None:
-    """Side-by-side of saved runs, with a warning when they are not comparable."""
+    """Side-by-side of saved runs, aligned by sampler *spec* rather than by name.
+
+    Two checkpoints may name their sampler settings differently — a run whose
+    transport starts from noise and one that starts from the distil describe the
+    same 8-step, cfg-1 operating point with different labels. Matching on
+    (steps, cfg, solver) compares equal compute on each model's own transport,
+    which is the honest pairing; rows without a counterpart are listed apart.
+    """
     runs = [json.loads(Path(p).read_text()) for p in paths]
     print_header("EchoFM - Comparison")
     for r in runs:
-        print_info(r["tag"], f"{r['checkpoint']}  (epoch {r['epoch']}, norm {r['normalization']}, "
+        print_info(r["tag"], f"{r['checkpoint']}  (epoch {r['epoch']}, "
+                             f"val_loss {r['val_loss']:.4f}, norm {r['normalization']}, "
                              f"{r['num_files']} files, commit {r['git_commit']})")
     base = runs[0]
     for r in runs[1:]:
         if r["files"] != base["files"]:
             print_info("Warning", f"{r['tag']} scored different utterances than {base['tag']}; "
-                                  "the numbers are not directly comparable", Colors.FAIL)
-    print_separator()
-    keys = list(base["summary"])
-    width = max(len(t["tag"]) for t in runs) + 2
+                                  "the numbers are not comparable", Colors.FAIL)
+
+    def spec_key(c: dict) -> tuple:
+        # `init` is deliberately not part of the key: where the transport starts
+        # is the model's architecture, not a knob, so a noise-source and a
+        # distil-source checkpoint are compared at equal compute on their own
+        # native transport. `start_t` *is* included — it marks a deliberately
+        # off-distribution run, which must not be matched to a native one.
+        return (c["steps"], c["cfg"], c.get("solver", "euler"), c.get("start_t", 0.0))
+
+    # anchors first: identical inputs, so any movement is measurement noise
+    anchors = [k for k in base["summary"] if k.startswith("anchor_")]
+    rows: list[tuple[str, list[str | None]]] = [(a, [a if a in r["summary"] else None for r in runs])
+                                                for a in anchors]
+    shared, unmatched = [], []
+    for c in base["sampler_configs"]:
+        for src in ("clean", "ar"):
+            keys = []
+            for r in runs:
+                match = next((rc for rc in r["sampler_configs"] if spec_key(rc) == spec_key(c)), None)
+                keys.append(f"{src}__{match['name']}" if match else None)
+            label = f"{src} · {c['steps']} steps, cfg {c['cfg']:g}, {c.get('solver', 'euler')}"
+            (shared if all(keys) else unmatched).append((label, keys))
+    rows += shared
+
+    width = max(len(r["tag"]) for r in runs) + 2
     for metric in ("wer", "mel", "frechet", "detail_ratio"):
-        print_section(metric)
-        for k in keys:
-            vals = [r["summary"].get(k, {}).get(metric) for r in runs]
+        printed = False
+        for label, keys in rows:
+            vals = [r["summary"].get(k, {}).get(metric) if k else None for k, r in zip(keys, runs)]
             if all(v is None or (isinstance(v, float) and np.isnan(v)) for v in vals):
                 continue
+            if not printed:
+                print_section(metric)
+                print(f"  {'':38s}" + "".join(f"{r['tag']:>{width}s}" for r in runs))
+                printed = True
             cells = "".join(f"{(v if v is not None else float('nan')):>{width}.3f}" for v in vals)
-            print(f"  {k:28s}{cells}")
-        print(f"  {'':28s}" + "".join(f"{r['tag']:>{width}s}" for r in runs))
+            print(f"  {label:38s}{cells}")
+    if unmatched:
+        print_section("no counterpart (listed for reference)")
+        for label, keys in unmatched:
+            have = [f"{r['tag']}:{k.split('__')[1]}" for k, r in zip(keys, runs) if k]
+            print(f"  {label:38s}  only in {', '.join(have)}")
 
 
 if __name__ == "__main__":

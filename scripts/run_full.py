@@ -182,6 +182,10 @@ def main() -> None:
     parser.add_argument("--solver", choices=("euler", "midpoint"), default="euler",
                         help="ODE integrator: 'euler' (1 model eval/step, default) or "
                              "'midpoint' (RK2, 2 evals/step, better at few steps).")
+    parser.add_argument("--seed", type=int, default=None, metavar="N",
+                        help="Seed the flow-matching source dither, making a rendering "
+                             "reproducible. Omitted, each run differs (fm_model.source_noise "
+                             "is what makes the transport stochastic).")
     parser.add_argument("--cfg", type=float, default=3.0,
                         help="Classifier-free guidance scale (default: 3.0; 1.0 disables guidance).")
     parser.add_argument(
@@ -285,6 +289,9 @@ def main() -> None:
     print_info("Steps", str(args.steps))
     print_info("Solver", args.solver)
     print_info("CFG scale", str(args.cfg))
+    print_info("Source noise", f"sigma {config.fm_model.source_noise:g}"
+               + (f", seed {args.seed}" if args.seed is not None else ", unseeded (varies per run)")
+               if config.fm_model.source_noise > 0 else "0 (deterministic)")
     print_info("Low-pass", f"{args.lowpass:g} Hz" if args.lowpass > 0 else "off")
     if config.latent_norm == "instance":
         print_info("Latent norm", "per instance (from the AR stage's own distil stats)",
@@ -372,8 +379,12 @@ def main() -> None:
 
     # --- Stage 3: distil latent -> data latent -> audio ----------------------
     print_section("Stage 3 — EchoFM")
+    generator = None
+    if args.seed is not None:
+        generator = torch.Generator(device=device).manual_seed(args.seed)
     with _timed("fm", device, timings):
-        latent = _generate(fm_model, text_ids, distil, args.steps, args.cfg, args.solver)
+        latent = _generate(fm_model, text_ids, distil, args.steps, args.cfg, args.solver,
+                           generator=generator)
     if stats is not None:
         mean, std = stats
         latent = latent * std + mean
