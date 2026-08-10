@@ -215,6 +215,12 @@ class EchoConfig:
     prosody_vocab_size: int
     init_std: float
 
+    # Where latent normalization statistics come from: "dataset" (one fixed
+    # per-channel affine map for the whole corpus, from latent_stats.npz) or
+    # "instance" (each utterance normalized by its own per-channel statistics,
+    # taken from its distil so the transform can be inverted at inference).
+    latent_norm: str
+
     # Limits
     text_len_limit: int
 
@@ -248,6 +254,7 @@ class EchoConfig:
             text_vocab_size=d["vocab_size"]["text"],
             prosody_vocab_size=d["vocab_size"]["prosody"],
             init_std=d["init_std"],
+            latent_norm=d.get("latent_norm", "dataset"),
             text_len_limit=d["limits"]["text_len"],
             text_pad=d["special_tokens"]["text_pad"],
             prosody_pad=d["special_tokens"]["prosody_pad"],

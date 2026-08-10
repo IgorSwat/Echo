@@ -19,14 +19,35 @@ class EchoDataset(Dataset):
     autoregressive model wants ``codec``. Samples are returned as dicts holding
     exactly the enabled fields.
 
-    Audio latents are optionally **channel-normalized**: per-channel mean and
-    std loaded from a ``latent_stats.npz`` file (produced by
-    ``scripts/compute_latent_stats.py``) are applied so each of the
-    ``latent_dim`` channels is approximately zero-mean unit-variance. This
-    aligns the data distribution with the unit-Gaussian noise prior used in
-    flow matching. The same stats file must be used to denormalize latents at
-    inference time before codec decoding. Codec tokens are discrete and are
-    never normalized.
+    Audio latents are **channel-normalized**, so each of the ``latent_dim``
+    channels is approximately zero-mean unit-variance and the data distribution
+    lines up with the unit-Gaussian noise prior used in flow matching. Codec
+    tokens are discrete and are never normalized.
+
+    ``norm_mode`` picks where the statistics come from:
+
+    ``"dataset"``
+        Per-channel mean and std for the whole corpus, loaded from a
+        ``latent_stats.npz`` file (produced by
+        ``scripts/compute_latent_stats.py``). One fixed affine map for every
+        utterance; the same file denormalizes latents at inference.
+
+    ``"instance"``
+        Per-channel mean and std of the utterance itself, computed over its own
+        time axis, which removes whatever level and channel-balance drift there
+        is between utterances before the model ever sees it.
+
+        Both streams are normalized by the **distil's** statistics, not each by
+        its own. Denormalizing a generated latent needs statistics that exist at
+        inference time, and the distil's are the only ones that do; scaling the
+        target by its own would make the mapping un-invertible. Inference must
+        use :meth:`instance_stats` on the distil and apply its inverse to the
+        model output.
+
+    Note that instance mode is only coherent for a run whose target is the audio
+    latent — the flow-matching one. The shortcut model *predicts* the distil, so
+    normalizing it by its own statistics would hide the very quantity it has to
+    output; that run should stay on ``"dataset"``.
 
     Note that latents and codec tokens live on different temporal grids (the
     codec stream is considerably coarser), so their lengths are tracked and
@@ -66,9 +87,14 @@ class EchoDataset(Dataset):
         load_latent: bool = True,
         load_distil: bool = True,
         load_codec: bool = True,
+        norm_mode: str = "dataset",
     ) -> None:
         self._tokenizer = tokenizer
         self._codec_layers = codec_layers
+
+        if norm_mode not in ("dataset", "instance"):
+            raise ValueError(f"norm_mode must be 'dataset' or 'instance', got {norm_mode!r}")
+        self._norm_mode = norm_mode
 
         self._load_latent = load_latent
         self._load_distil = load_distil
@@ -122,14 +148,19 @@ class EchoDataset(Dataset):
         return len(self._samples)
 
     def _load_frames(self, directory: Path, npz_name: str) -> torch.Tensor:
-        """Load a ``(C, T)`` latent file as a normalized ``(T, C)`` tensor."""
+        """Load a ``(C, T)`` latent file as an unnormalized ``(T, C)`` tensor."""
         arr = np.load(directory / npz_name)[self.LATENT_KEY]        # (C, T)
-        frames = torch.from_numpy(arr.T.copy()).float()             # (T, C)
+        return torch.from_numpy(arr.T.copy()).float()               # (T, C)
 
-        if self._latent_mean is not None:
-            frames = (frames - self._latent_mean) / self._latent_std
+    @staticmethod
+    def instance_stats(frames: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-channel mean/std of one utterance, over its own time axis.
 
-        return frames                                               # (T, C)
+        Kept as a static method so inference can normalize with exactly the same
+        arithmetic the dataset used — the reference tensor is the distil, which
+        is the one thing available at both training and inference time.
+        """
+        return frames.mean(0), frames.std(0).clamp_min(1e-5)         # (C,), (C,)
 
     def _load_codes(self, npz_name: str) -> torch.Tensor:
         """Load a ``(num_layers, T)`` codec file as a ``(T, codec_layers)`` tensor."""
@@ -158,10 +189,29 @@ class EchoDataset(Dataset):
             "text": torch.tensor(self._tokenizer.tokenize(phonemes), dtype=torch.long),
         }
 
-        if self._load_latent:
-            sample["latent"] = self._load_frames(self._latent_dir, npz_name)
-        if self._load_distil:
-            sample["distil"] = self._load_frames(self._distils_dir, npz_name)
+        latent = self._load_frames(self._latent_dir, npz_name) if self._load_latent else None
+        distil = self._load_frames(self._distils_dir, npz_name) if self._load_distil else None
+
+        if self._norm_mode == "instance":
+            # One set of stats for both streams, taken from the distil. Using
+            # each tensor's own stats would leave the target un-invertible:
+            # denormalizing a generated latent needs numbers that exist at
+            # inference, and only the distil's do.
+            reference = distil if distil is not None else latent
+            mean, std = self.instance_stats(reference)
+        else:
+            mean, std = self._latent_mean, self._latent_std
+
+        if mean is not None:
+            if latent is not None:
+                latent = (latent - mean) / std
+            if distil is not None:
+                distil = (distil - mean) / std
+
+        if latent is not None:
+            sample["latent"] = latent
+        if distil is not None:
+            sample["distil"] = distil
         if self._load_codec:
             sample["codec"] = self._load_codes(npz_name)
 

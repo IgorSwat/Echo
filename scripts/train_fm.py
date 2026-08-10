@@ -122,6 +122,7 @@ def main() -> None:
         data_dir / "phonemes.csv", latent_dir, distils_dir, tokenizer,
         latent_stats=latent_stats,
         load_codec=False,                          # flow matching runs on latents only
+        norm_mode=config.latent_norm,
     )
 
     val_len = int(len(dataset) * cfg.val_ratio)
@@ -159,11 +160,17 @@ def main() -> None:
     print_section("Setup")
     print_info("Device", str(device), Colors.OKCYAN)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
-    print_info(
-        "Latent normalization",
-        f"enabled ({latent_stats})" if latent_stats.is_file() else "disabled (stats file missing)",
-        Colors.OKCYAN if latent_stats.is_file() else Colors.WARNING,
-    )
+    if config.latent_norm == "instance":
+        print_info("Latent normalization",
+                   "per instance (each utterance by its own distil's channel stats; "
+                   "inference must invert with the same numbers)", Colors.OKCYAN)
+    else:
+        print_info(
+            "Latent normalization",
+            f"per dataset ({latent_stats})" if latent_stats.is_file()
+            else "disabled (stats file missing)",
+            Colors.OKCYAN if latent_stats.is_file() else Colors.WARNING,
+        )
     print_info("Parameters", f"{sum(p.numel() for p in model.parameters()):,}")
     print_info("Batch size", str(cfg.batch_size))
     print_info("Total steps", str(total_steps))

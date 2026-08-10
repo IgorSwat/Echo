@@ -97,47 +97,85 @@ def _generate(
     cfg_scale: float,
     solver: str,
     generator: Optional[torch.Generator] = None,
+    x0: Optional[torch.Tensor] = None,
+    start_t: float = 0.0,
 ) -> torch.Tensor:
-    """Integrate the velocity field from t=0 (noise) to t=1 (data).
+    """Integrate the velocity field from t=``start_t`` to t=1 (data).
 
-    ``distil`` is the conditioning, not the starting point: the state starts as
-    fresh Gaussian noise shaped like it, so two calls on the same distil give
-    two different renderings of the same utterance. Pass ``generator`` to make a
-    run reproducible.
+    ``distil`` is the conditioning, not the starting point: by default the state
+    starts as fresh Gaussian noise shaped like it, so two calls on the same
+    distil give two different renderings of the same utterance. Pass
+    ``generator`` to make a run reproducible.
 
-    ``euler``    -- x <- x + v(x, t_i) * dt with t_i = i / steps; the canonical
-                    flow-matching sampler (1 model evaluation per step).
+    ``x0`` overrides that starting state — pass the distil itself to run the
+    transport the way the earlier, distil-as-source model did. Note this is not
+    what the current model was trained for: it learned a field over states drawn
+    from the noise-to-data path, and the distil sits somewhere off that path, so
+    the trajectory starts out of distribution. It is an experiment, not the
+    supported route.
+
+    ``start_t`` skips the early part of the schedule, which only makes sense
+    together with ``x0``: a state that is already partway to the data should be
+    integrated from where it actually sits, not from t=0. At ``start_t=0.4`` the
+    model is told "this is a 40%-complete sample, finish it".
+
+    ``euler``    -- x <- x + v(x, t_i) * dt; the canonical flow-matching sampler
+                    (1 model evaluation per step).
     ``midpoint`` -- explicit midpoint (RK2): predict the state at t_i + dt/2
                     with an Euler half-step, then advance using the velocity
                     evaluated there (2 model evaluations per step).
     """
-    dt = 1.0 / steps
-    x = torch.randn(distil.shape, device=distil.device, dtype=distil.dtype,
-                    generator=generator)
+    if not 0.0 <= start_t < 1.0:
+        raise ValueError(f"start_t must be in [0, 1), got {start_t}")
+
+    x = (torch.randn(distil.shape, device=distil.device, dtype=distil.dtype,
+                     generator=generator) if x0 is None else x0.clone())
+
+    span = 1.0 - start_t
+    dt = span / steps
     for i in range(steps):
-        t0 = torch.full((1,), i / steps, device=text_ids.device)
+        t0 = torch.full((1,), start_t + i * dt, device=text_ids.device)
         if solver == "euler":
             x = x + dt * _velocity(model, text_ids, x, t0, cfg_scale, distil)
         else:                                                             # midpoint (RK2)
             v1 = _velocity(model, text_ids, x, t0, cfg_scale, distil)
             x_mid = x + 0.5 * dt * v1
-            t_mid = torch.full((1,), (i + 0.5) / steps, device=text_ids.device)
+            t_mid = torch.full((1,), start_t + (i + 0.5) * dt, device=text_ids.device)
             x = x + dt * _velocity(model, text_ids, x_mid, t_mid, cfg_scale, distil)
     return x                                                              # (1, T, C)
+
+
+def _norm_stats(
+    distil: torch.Tensor,                                            # (..., T, C) unnormalized
+    stats: tuple[torch.Tensor, torch.Tensor] | None,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """The (mean, std) that normalize the distil and denormalize the output.
+
+    Under ``latent_norm = "instance"`` these come from the distil itself, over
+    its own time axis — the same arithmetic ``EchoDataset`` applied in training,
+    and the reason the target was normalized by the *distil's* statistics rather
+    than its own: at inference the distil is the only tensor that exists, so
+    only its statistics can invert the model's output.
+    """
+    if config.latent_norm == "instance":
+        return (distil.mean(dim=-2, keepdim=True),
+                distil.std(dim=-2, keepdim=True).clamp_min(1e-5))
+    return stats
 
 
 def _load_and_normalize_distil(
     distil_path: Path,
     device: torch.device,
     stats: tuple[torch.Tensor, torch.Tensor] | None,
-) -> tuple[torch.Tensor, float]:
+) -> tuple[torch.Tensor, float, tuple[torch.Tensor, torch.Tensor] | None]:
     d_arr = np.load(distil_path)["latents"]                          # (C, T)
     distil = torch.from_numpy(d_arr.T.copy()).float().to(device)     # (T, C)
     duration = distil.shape[0] * _HOP / _SAMPLE_RATE
-    if stats is not None:
-        mean, std = stats
+    used = _norm_stats(distil, stats)
+    if used is not None:
+        mean, std = used
         distil = (distil - mean) / std
-    return distil, duration
+    return distil, duration, used
 
 
 @torch.no_grad()
@@ -151,7 +189,7 @@ def _generate_one(
     steps: int,
     cfg_scale: float,
     solver: str,
-    stats: tuple[torch.Tensor, torch.Tensor] | None,
+    stats: tuple[torch.Tensor, torch.Tensor] | None,   # the ones that normalized `distil`
     device: torch.device,
     output_path: Path,
 ) -> None:
@@ -246,20 +284,24 @@ def main() -> None:
         print_info("Steps", str(args.steps))
         print_info("Solver", args.solver)
         print_info("CFG scale", str(args.cfg))
-        if stats is not None:
-            print_info("Latent norm", f"enabled ({stats_path})", Colors.OKCYAN)
+        if config.latent_norm == "instance":
+            print_info("Latent norm", "per instance (from this distil's own channel stats)",
+                       Colors.OKCYAN)
+        elif stats is not None:
+            print_info("Latent norm", f"per dataset ({stats_path})", Colors.OKCYAN)
         else:
             print_info("Latent norm", f"disabled (stats not found: {stats_path})", Colors.WARNING)
 
         for i, (npz_name, phonemes) in enumerate(test_entries):
             distil_path = distils_dir / npz_name
-            distil, duration = _load_and_normalize_distil(distil_path, device, stats)
+            distil, duration, used_stats = _load_and_normalize_distil(
+                distil_path, device, stats)
             out_name = Path(npz_name).stem + ".wav"
             output_path = test_csv.parent / "test_outputs" / out_name
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             _generate_one(model, tokenizer, codec, phonemes, distil, duration,
-                          args.steps, args.cfg, args.solver, stats, device, output_path)
+                          args.steps, args.cfg, args.solver, used_stats, device, output_path)
 
             print_info(f"[{i + 1}/{len(test_entries)}]", f"{npz_name} -> {output_path.name}",
                        Colors.OKGREEN)
@@ -269,7 +311,8 @@ def main() -> None:
     else:
         # --- Single-sample mode ---------------------------------------------
         distil_path = Path(args.distil)
-        distil, duration = _load_and_normalize_distil(distil_path, device, stats)
+        distil, duration, used_stats = _load_and_normalize_distil(
+            distil_path, device, stats)
         phonemes = phonemize_args(args.text, args)
 
         print_header("Echo - Generation")
@@ -291,7 +334,7 @@ def main() -> None:
             print_info("Latent norm", f"disabled (stats not found: {stats_path})", Colors.WARNING)
 
         _generate_one(model, tokenizer, codec, phonemes, distil, duration,
-                      args.steps, args.cfg, args.solver, stats, device, Path(args.output))
+                      args.steps, args.cfg, args.solver, used_stats, device, Path(args.output))
 
         print_separator()
         print_info("Saved", args.output, Colors.OKGREEN)
