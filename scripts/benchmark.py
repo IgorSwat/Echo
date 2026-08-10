@@ -125,10 +125,11 @@ def benchmark_fm(args: argparse.Namespace, device: torch.device) -> None:
         for t_text in T_TEXT_VALUES:
             text = torch.randint(0, config.text_vocab_size, (B, t_text), device=device)
             latent = torch.randn(B, t_audio, config.latent_dim, device=device)
+            distil = torch.randn(B, t_audio, config.latent_dim, device=device)
             time_tensor = torch.rand(B, device=device)
 
             secs[(t_audio, t_text)] = _time(
-                lambda: model(text, latent, time_tensor),
+                lambda: model(text, latent, time_tensor, distil),
                 warmup=args.warmup, iters=args.iters, device=device,
             )
 

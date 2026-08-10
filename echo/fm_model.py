@@ -14,13 +14,25 @@ import torch.nn.functional as F
 
 class EchoFM(nn.Module):
     """
-    EchoFM: text- and time-conditioned audio latent diffusion backbone.
+    EchoFM: text-, distil- and time-conditioned audio latent flow-matching backbone.
 
     Pipeline:
       1. Encode time  -> (B, time_embedding_dim) conditioning vector (AdaLN).
       2. Encode text  -> (B, S, text_embedding_dim) conditioning context.
       3. Run the main processing stack (blocks defined in config["fm_model"]["blocks"]).
       4. Project hidden -> latent_dim output.
+
+    The flow runs from **noise** to the data latent; the distil latent is
+    *conditioning*, concatenated channel-wise onto the integration state, which
+    is why the stack starts at ``2 * latent_dim``.
+
+    Using the distil as the source of the transport instead makes it a
+    deterministic function of the target, and a deterministic pairing leaves the
+    model nothing to sample: the L2-optimal answer is the mean over every
+    high-quality rendering consistent with that distil, which is audible as
+    blur. Noise restores the seed, so the detail the 2-codebook compression
+    destroyed is drawn rather than averaged, and the distil still supplies the
+    rhythm and content it was always meant to carry.
 
     U-Net skips: each `downsample` stashes the current feature; each `skip`
     pops the latest stash and fuses it with the current stream (after the
@@ -47,7 +59,11 @@ class EchoFM(nn.Module):
 
         self.hidden_dim = cfg.text_embedding_dim
         self.cond_dim = cfg.time_embedding_dim
-        self.audio_in_dim = audio_in_dim if audio_in_dim is not None else config.latent_dim
+        # The state being integrated and the distil conditioning enter together,
+        # stacked on the channel axis: latent_dim for each.
+        self.audio_in_dim = (
+            audio_in_dim if audio_in_dim is not None else 2 * config.latent_dim
+        )
 
         # --- Conditioning streams ---
         self.time_encoder = TimeEncoder(cfg.time_embedding_dim)
@@ -143,12 +159,21 @@ class EchoFM(nn.Module):
     def forward(
         self,
         text: torch.Tensor,                                         # (B, S) long
-        latent: torch.Tensor,                                       # (B, T, latent_dim)
+        latent: torch.Tensor,                                       # (B, T, latent_dim), the state
         time: torch.Tensor,                                         # (B,)
+        distil: Optional[torch.Tensor] = None,                      # (B, T, latent_dim) conditioning
         text_key_padding_mask: Optional[torch.Tensor] = None,       # (B, S) or None
         latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
         text_drop_mask: Optional[torch.Tensor] = None,              # (B,) bool or None
     ) -> torch.Tensor:
+        if distil is None:
+            raise ValueError("EchoFM conditions on a distil latent; pass `distil`")
+        if distil.shape != latent.shape:
+            raise ValueError(
+                f"distil must match the state it conditions: got {tuple(distil.shape)} "
+                f"against {tuple(latent.shape)}"
+            )
+
         # First encode both text & time
         cond = self.time_encoder(time)                                # (B, cond_dim)
         text_enc = self.text_encoder(text, text_key_padding_mask)    # (B, S, hidden)
@@ -159,7 +184,10 @@ class EchoFM(nn.Module):
             null = self.null_text.expand_as(text_enc)                # (B, S, hidden)
             text_enc = torch.where(text_drop_mask.view(-1, 1, 1), null, text_enc)
 
-        x = latent                                                     # (B, T, latent_dim)
+        # The conditioning rides alongside the state through the whole stack:
+        # both live on the same frame grid, so a channel-wise stack keeps them
+        # aligned frame-for-frame with no resampling.
+        x = torch.cat([latent, distil], dim=-1)                        # (B, T, 2*latent_dim)
         mask = latent_key_padding_mask
         skips: list[torch.Tensor] = []
 

@@ -89,7 +89,7 @@
     "blocks": [
       {
         "type": "convnext",
-        "dim_in": 24,
+        "dim_in": 48,
         "dim_out": 64,
         "kernel_size": 7,
         "dropout": 0.1

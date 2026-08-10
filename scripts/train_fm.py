@@ -58,7 +58,16 @@ def _flow_matching_loss(
     device: torch.device,
     text_dropout_p: float = 0.0,
 ) -> torch.Tensor:
-    """Interpolate between distil x0 and data x1; predict the velocity x1 - x0.
+    """Interpolate between noise x0 and data x1; predict the velocity x1 - x0.
+
+    The transport runs from a unit Gaussian, and the distil latent enters as
+    *conditioning* rather than as the starting point. That distinction is what
+    keeps the model generative: pairing each target with its own distil makes
+    the source a deterministic function of the target, and against a
+    deterministic pairing the L2-optimal velocity is the mean over every
+    rendering consistent with that distil — the blur that shows up as a washed
+    out, over-smoothed output. Sampling x0 fresh each time restores the seed the
+    model needs to produce detail instead of averaging it away.
 
     With probability ``text_dropout_p`` (per sample), the text conditioning is
     replaced by the model's learned null-text condition, enabling
@@ -66,9 +75,10 @@ def _flow_matching_loss(
     """
     text = batch["text"].to(device)
     x1 = batch["latent"].to(device)
-    x0 = batch["distil"].to(device)
+    distil = batch["distil"].to(device)
     text_mask = batch["text_key_padding_mask"].to(device)
     latent_mask = batch["latent_key_padding_mask"].to(device)
+    x0 = torch.randn_like(x1)
     t = torch.rand(x1.shape[0], device=device)
     xt = (1.0 - t[:, None, None]) * x0 + t[:, None, None] * x1
     target = x1 - x0
@@ -77,7 +87,7 @@ def _flow_matching_loss(
     if text_dropout_p > 0.0:
         text_drop_mask = torch.rand(x1.shape[0], device=device) < text_dropout_p
 
-    pred = model(text, xt, t, text_mask, latent_mask, text_drop_mask)
+    pred = model(text, xt, t, distil, text_mask, latent_mask, text_drop_mask)
     return _masked_mse(pred, target, latent_mask)
 
 

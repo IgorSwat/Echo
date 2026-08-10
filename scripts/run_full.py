@@ -3,9 +3,9 @@
 
 Chains the two models. EchoAR writes a Mimi token grid from the phoneme string
 alone, Mimi decodes it to a coarse 24 kHz waveform, BlueCodec re-encodes that
-into a distil latent, and EchoFM flows from the distil latent to the data
-distribution — exactly the ``distil -> data`` transport it was trained on, only
-with the distil side synthesised instead of read from disk.
+into a distil latent, and EchoFM generates the data latent from noise with that
+distil as conditioning — exactly the transport it was trained on, only with the
+conditioning synthesised instead of read from disk.
 
     text -> EchoAR -> Mimi.decode -> resample -> BlueCodec.encode
          -> EchoFM (ODE) -> BlueCodec.decode -> audio
@@ -354,7 +354,7 @@ def main() -> None:
     print_info("Distil latent", f"{tuple(distil.shape)}  ({distil.shape[1] / (_BLUE_SR / _BLUE_HOP):.2f}s)")
     print_info("Time", f"{timings['codec']:.3f}s")
 
-    # --- Stage 3: distil latent -> data latent -> audio ----------------------
+    # --- Stage 3: noise -> data latent (distil conditions it) -> audio -------
     print_section("Stage 3 — EchoFM")
     with _timed("fm", device, timings):
         latent = _generate(fm_model, text_ids, distil, args.steps, args.cfg, args.solver)

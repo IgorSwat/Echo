@@ -4,4 +4,5 @@ data/norbi/distils.zip filter=lfs diff=lfs merge=lfs -text
 data/ljspeech/codecs.zip filter=lfs diff=lfs merge=lfs -text
 data/ljspeech/latents.zip filter=lfs diff=lfs merge=lfs -text
 data/ljspeech/distils.zip filter=lfs diff=lfs merge=lfs -text
+data/ljspeech/distils_ar.zip filter=lfs diff=lfs merge=lfs -text
 checkpoints/echo_final.pt filter=lfs diff=lfs merge=lfs -text
