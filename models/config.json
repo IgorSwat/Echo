@@ -109,12 +109,14 @@
         "dropout": 0.1
       },
       {
-        "type": "self_attention",
+        "type": "hybrid_attention",
         "d_model": 128,
+        "d_kv": 256,
         "num_heads": 4,
         "ffn_dim": 512,
         "dropout": 0.1,
-        "use_rope": true
+        "use_rope": true,
+        "use_ada_ln": true
       },
       {
         "type": "convnext",
@@ -138,18 +140,9 @@
         "dropout": 0.1
       },
       {
-        "type": "self_attention",
+        "type": "hybrid_attention",
         "d_model": 256,
-        "num_heads": 4,
-        "ffn_dim": 1024,
-        "dropout": 0.1,
-        "use_rope": true
-      },
-      {
-        "type": "cross_attention",
-        "d_query": 256,
         "d_kv": 256,
-        "d_model": 256,
         "num_heads": 8,
         "ffn_dim": 1024,
         "dropout": 0.1,
@@ -171,18 +164,9 @@
         "dropout": 0.1
       },
       {
-        "type": "self_attention",
+        "type": "hybrid_attention",
         "d_model": 512,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true
-      },
-      {
-        "type": "cross_attention",
-        "d_query": 512,
         "d_kv": 256,
-        "d_model": 512,
         "num_heads": 8,
         "ffn_dim": 2048,
         "dropout": 0.1,
@@ -190,18 +174,9 @@
         "use_ada_ln": true
       },
       {
-        "type": "self_attention",
+        "type": "hybrid_attention",
         "d_model": 512,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true
-      },
-      {
-        "type": "cross_attention",
-        "d_query": 512,
         "d_kv": 256,
-        "d_model": 512,
         "num_heads": 8,
         "ffn_dim": 2048,
         "dropout": 0.1,
@@ -209,18 +184,9 @@
         "use_ada_ln": true
       },
       {
-        "type": "self_attention",
+        "type": "hybrid_attention",
         "d_model": 512,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true
-      },
-      {
-        "type": "cross_attention",
-        "d_query": 512,
         "d_kv": 256,
-        "d_model": 512,
         "num_heads": 8,
         "ffn_dim": 2048,
         "dropout": 0.1,
@@ -228,18 +194,9 @@
         "use_ada_ln": true
       },
       {
-        "type": "self_attention",
+        "type": "hybrid_attention",
         "d_model": 512,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true
-      },
-      {
-        "type": "cross_attention",
-        "d_query": 512,
         "d_kv": 256,
-        "d_model": 512,
         "num_heads": 8,
         "ffn_dim": 2048,
         "dropout": 0.1,
@@ -247,12 +204,14 @@
         "use_ada_ln": true
       },
       {
-        "type": "self_attention",
+        "type": "hybrid_attention",
         "d_model": 512,
+        "d_kv": 256,
         "num_heads": 8,
         "ffn_dim": 2048,
         "dropout": 0.1,
-        "use_rope": true
+        "use_rope": true,
+        "use_ada_ln": true
       }
     ]
   },

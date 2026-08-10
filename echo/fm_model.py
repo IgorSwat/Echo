@@ -3,7 +3,11 @@ from echo import config
 from echo.modules.conv import ConvNeXtBlock, Downsample1D, SkipConnection1D, Upsample1D
 from echo.modules.text_encoder import TextEncoder
 from echo.modules.time_encoder import TimeEncoder
-from echo.modules.transformer import CrossAttentionBlock, SelfAttentionBlock
+from echo.modules.transformer import (
+    CrossAttentionBlock,
+    HybridAttentionBlock,
+    SelfAttentionBlock,
+)
 
 from typing import Optional
 
@@ -40,8 +44,16 @@ class EchoFM(nn.Module):
     """
 
     # Registry mapping the "type" string in a block spec to its module class.
+    #
+    # ``hybrid_attention`` is the preferred attention block: one pre-norm block
+    # that attends over the latent stream *and* over the text, sharing a single
+    # FFN. Splitting the two into a ``self_attention`` block followed by a
+    # ``cross_attention`` one costs a second FFN and, more importantly, leaves
+    # stretches of the stack where the latent is refined with no view of the
+    # text at all. The separate types are kept so older configs still build.
     BLOCK_REGISTRY = {
         "convnext": ConvNeXtBlock,
+        "hybrid_attention": HybridAttentionBlock,
         "self_attention": SelfAttentionBlock,
         "cross_attention": CrossAttentionBlock,
         "downsample": Downsample1D,
@@ -50,7 +62,7 @@ class EchoFM(nn.Module):
     }
 
     # Block types that accept AdaLN conditioning (use_ada_ln / cond_dim).
-    COND_TYPES = {"convnext", "self_attention", "cross_attention"}
+    COND_TYPES = {"convnext", "hybrid_attention", "self_attention", "cross_attention"}
 
     def __init__(self, audio_in_dim: Optional[int] = None) -> None:
         super().__init__()
@@ -142,7 +154,7 @@ class EchoFM(nn.Module):
     def _infer_out_dim(block_type: str, spec: dict, in_dim: int) -> int:
         if block_type == "convnext":
             return spec["dim_out"]
-        if block_type in ("self_attention", "cross_attention"):
+        if block_type in ("hybrid_attention", "self_attention", "cross_attention"):
             return spec["d_model"]
         if block_type == "downsample":
             return 2 * spec["dim_in"]
@@ -192,7 +204,12 @@ class EchoFM(nn.Module):
         skips: list[torch.Tensor] = []
 
         for block in self.blocks:
-            if isinstance(block, CrossAttentionBlock):
+            if isinstance(block, HybridAttentionBlock):
+                # Self-attention over the latent and cross-attention over the
+                # text, in one block: `mask` covers the latent stream it attends
+                # over, `text_key_padding_mask` the context it reads.
+                x, _ = block(x, text_enc, mask, text_key_padding_mask, cond)  # (B, T, d)
+            elif isinstance(block, CrossAttentionBlock):
                 x, _ = block(x, text_enc, text_key_padding_mask, cond, mask)  # (B, T', d')
             elif isinstance(block, SelfAttentionBlock):
                 x, _ = block(x, mask, cond)                            # (B, T', d')

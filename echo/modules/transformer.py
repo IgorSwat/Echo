@@ -53,6 +53,10 @@ class SelfAttentionBlock(nn.Module):
         return x, cache                                              # (B, T, D), cache
 
 
+def _open_cross_gate(gate: torch.Tensor, use_ada_ln: bool) -> torch.Tensor:
+    return gate + 1.0 if use_ada_ln else gate
+
+
 class CrossAttentionBlock(nn.Module):
     """
     Pre-norm transformer block with cross-attention over an external context.
@@ -113,7 +117,7 @@ class CrossAttentionBlock(nn.Module):
             q, ctx, key_padding_mask, query_padding_mask, kv_cache, start_pos
         )
         if not self.needs_proj:
-            delta = g1[:, None, :] * delta
+            delta = _open_cross_gate(g1, self.use_ada_ln)[:, None, :] * delta
 
         residual = self.resid_proj(x) if self.needs_proj else x        # (B, T, d_model)
         x = residual + delta                                           # (B, T, d_model)
@@ -188,7 +192,9 @@ class HybridAttentionBlock(nn.Module):
         attn, cross_cache = self.cross_attn(
             q, ctx, context_padding_mask, padding_mask, cross_cache, start_pos
         )
-        x = x + g2[:, None, :] * attn                                # (B, T, d_model)
+        # Identity-initialized rather than zero-initialized: this is the only
+        # path the context takes in. See :func:`_open_cross_gate`.
+        x = x + _open_cross_gate(g2, self.use_ada_ln)[:, None, :] * attn
 
         # Norm & FFN
         h, g3 = self.norm2(x, cond)                                  # (B, T, d_model), (B, d_model)
