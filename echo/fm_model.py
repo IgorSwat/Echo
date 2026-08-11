@@ -1,9 +1,10 @@
 from echo import config
 
-from echo.modules.conv import ConvNeXtBlock, Downsample1D, SkipConnection1D, Upsample1D
-from echo.modules.text_encoder import TextEncoder
-from echo.modules.time_encoder import TimeEncoder
-from echo.modules.transformer import (
+from echo.components.text_encoder import TextEncoder
+from echo.components.time_encoder import TimeEncoder
+
+from echo.nn.conv import ConvNeXtBlock
+from echo.nn.transformer_blocks import (
     CrossAttentionBlock,
     HybridAttentionBlock,
     SelfAttentionBlock,
@@ -13,48 +14,26 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class EchoFM(nn.Module):
     """
     EchoFM: text-, distil- and time-conditioned audio latent flow-matching backbone.
-
-    Pipeline:
-      1. Encode time  -> (B, time_embedding_dim) conditioning vector (AdaLN).
-      2. Encode text  -> (B, S, text_embedding_dim) conditioning context.
-      3. Run the main processing stack (blocks defined in config["fm_model"]["blocks"]).
-      4. Project hidden -> latent_dim output.
-
-    The flow runs from the **distil latent** to the data latent: the distil is
-    the integration's starting state, not a side input, so the model transports
-    one to the other and there is no separate conditioning stream.
-
-    U-Net skips: each `downsample` stashes the current feature; each `skip`
-    pops the latest stash and fuses it with the current stream (after the
-    matching `upsample`).
     """
 
-    # Registry mapping the "type" string in a block spec to its module class.
-    #
-    # ``hybrid_attention`` is the preferred attention block: one pre-norm block
-    # that attends over the latent stream *and* over the text, sharing a single
-    # FFN. Splitting the two into a ``self_attention`` block followed by a
-    # ``cross_attention`` one costs a second FFN and, more importantly, leaves
-    # stretches of the stack where the latent is refined with no view of the
-    # text at all. The separate types are kept so older configs still build.
+    # Maps the "type" in a block spec to its module class.
     BLOCK_REGISTRY = {
         "convnext": ConvNeXtBlock,
         "hybrid_attention": HybridAttentionBlock,
         "self_attention": SelfAttentionBlock,
         "cross_attention": CrossAttentionBlock,
-        "downsample": Downsample1D,
-        "upsample": Upsample1D,
-        "skip": SkipConnection1D,
     }
 
     # Block types that accept AdaLN conditioning (use_ada_ln / cond_dim).
     COND_TYPES = {"convnext", "hybrid_attention", "self_attention", "cross_attention"}
+
+    # ODE integrators available to :meth:`sample`.
+    SOLVERS = ("euler", "midpoint")
 
     def __init__(self, audio_in_dim: Optional[int] = None) -> None:
         super().__init__()
@@ -82,12 +61,10 @@ class EchoFM(nn.Module):
             max_seq_len=config.text_len_limit,
         )
 
-        # --- Main processing stack (built from config["fm_model"]["blocks"]) ---
-        # The block flow defines its own dim progression starting from latent_dim.
+        # --- Main processing stack ---
         self.blocks, out_dim = self._build_blocks()
 
-        # Learned null-text condition for classifier-free guidance: replaces the
-        # text encoder output for samples whose conditioning is dropped.
+        # Null-text condition for classifier-free guidance.
         self.null_text = nn.Parameter(torch.zeros(1, 1, cfg.text_embedding_dim))
 
         self.final_norm = nn.LayerNorm(out_dim)
@@ -95,13 +72,16 @@ class EchoFM(nn.Module):
 
         self._init_weights()
 
+    # ---------------
+    # Stack assembly
+    # ---------------
+
     def _build_blocks(self) -> tuple[nn.ModuleList, int]:
         blocks: list[nn.Module] = []
         cur_dim = self.audio_in_dim
-        # Parallel to runtime skip stack: dims of features stashed before each downsample.
-        skip_dims: list[int] = []
+
         for spec in config.fm_model.blocks:
-            spec = dict(spec)                                          # copy (don't mutate config)
+            spec = dict(spec)                                       # copy: don't mutate config
             block_type = spec.pop("type", None)
             if block_type is None:
                 raise ValueError(f"Block spec missing 'type' key: {spec}")
@@ -110,51 +90,36 @@ class EchoFM(nn.Module):
                     f"Unknown block type '{block_type}'. "
                     f"Expected one of {list(self.BLOCK_REGISTRY)}"
                 )
-            cls = self.BLOCK_REGISTRY[block_type]
-            # Inject AdaLN conditioning defaults; overridable per-block.
+
+            # AdaLN defaults, overridable per block.
             if block_type in self.COND_TYPES:
                 spec.setdefault("use_ada_ln", True)
                 spec.setdefault("cond_dim", self.cond_dim)
-            # Override dim_in with the current dimension so the config
-            # only needs to specify dim_out for convnext blocks.
+            # The running dimension wins, so a config only specifies dim_out.
             if "dim_in" in spec:
                 spec["dim_in"] = cur_dim
-            if block_type == "downsample":
-                skip_dims.append(cur_dim)
-            elif block_type == "skip":
-                if not skip_dims:
-                    raise ValueError(
-                        "skip block has no matching downsample "
-                        "(skip stack is empty during build)"
-                    )
-                spec["dim_x"] = cur_dim
-                spec["dim_skip"] = skip_dims.pop()
-                spec.setdefault("mode", "add")
-            blocks.append(cls(**spec))
-            cur_dim = self._infer_out_dim(block_type, spec, cur_dim)
-        if skip_dims:
-            raise ValueError(
-                f"{len(skip_dims)} downsample(s) without matching skip block(s)"
-            )
+
+            blocks.append(self.BLOCK_REGISTRY[block_type](**spec))
+            cur_dim = self._infer_out_dim(block_type, spec)
+
         return nn.ModuleList(blocks), cur_dim
 
     @staticmethod
-    def _infer_out_dim(block_type: str, spec: dict, in_dim: int) -> int:
+    def _infer_out_dim(block_type: str, spec: dict) -> int:
         if block_type == "convnext":
             return spec["dim_out"]
         if block_type in ("hybrid_attention", "self_attention", "cross_attention"):
             return spec["d_model"]
-        if block_type == "downsample":
-            return 2 * spec["dim_in"]
-        if block_type == "upsample":
-            return spec["dim_in"] // 2
-        if block_type == "skip":
-            return spec["dim_x"]
         raise ValueError(f"cannot infer output dim for block type '{block_type}'")
 
     def _init_weights(self) -> None:
+        # Submodules initialized themselves; this covers what EchoFM owns directly.
         nn.init.normal_(self.out_proj.weight, mean=0.0, std=config.init_std)
         nn.init.zeros_(self.out_proj.bias)
+
+    # --------------
+    # Forward pass
+    # --------------
 
     def forward(
         self,
@@ -165,64 +130,91 @@ class EchoFM(nn.Module):
         latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
         text_drop_mask: Optional[torch.Tensor] = None,              # (B,) bool or None
     ) -> torch.Tensor:
-        # First encode both text & time
-        cond = self.time_encoder(time)                                # (B, cond_dim)
-        text_enc = self.text_encoder(text, text_key_padding_mask)    # (B, S, hidden)
+        cond = self.time_encoder(time)                              # (B, cond_dim)
+        text_enc = self.text_encoder(text, text_key_padding_mask)   # (B, S, hidden)
 
-        # Classifier-free guidance: swap in the learned null-text condition
-        # for samples whose text conditioning is dropped.
+        # Classifier-free guidance: swap in the learned null-text condition.
         if text_drop_mask is not None and text_drop_mask.any():
-            null = self.null_text.expand_as(text_enc)                # (B, S, hidden)
+            null = self.null_text.expand_as(text_enc)               # (B, S, hidden)
             text_enc = torch.where(text_drop_mask.view(-1, 1, 1), null, text_enc)
 
-        x = latent                                                     # (B, T, latent_dim)
+        x = latent                                                  # (B, T, latent_dim)
         mask = latent_key_padding_mask
-        skips: list[torch.Tensor] = []
 
         for block in self.blocks:
             if isinstance(block, HybridAttentionBlock):
-                # Self-attention over the latent and cross-attention over the
-                # text, in one block: `mask` covers the latent stream it attends
-                # over, `text_key_padding_mask` the context it reads.
-                x, _ = block(x, text_enc, mask, text_key_padding_mask, cond)  # (B, T, d)
+                # `mask` covers the latent it attends over, `text_key_padding_mask`
+                # the context it reads.
+                x, _ = block(x, text_enc, mask, text_key_padding_mask, cond)
             elif isinstance(block, CrossAttentionBlock):
-                x, _ = block(x, text_enc, text_key_padding_mask, cond, mask)  # (B, T', d')
+                x, _ = block(x, text_enc, text_key_padding_mask, cond, mask)
             elif isinstance(block, SelfAttentionBlock):
-                x, _ = block(x, mask, cond)                            # (B, T', d')
-            elif isinstance(block, Downsample1D):
-                skips.append(x)                                        # stash encoder feature
-                x = block(x)                                            # (B, T//2, 2C)
-                if mask is not None:
-                    mask = F.interpolate(
-                        mask.float().unsqueeze(1),
-                        size=x.shape[1],
-                        mode="nearest",
-                    ).squeeze(1).bool()
-            elif isinstance(block, Upsample1D):
-                x = block(x)                                            # (B, 2T, C//2)
-                if mask is not None:
-                    mask = F.interpolate(
-                        mask.float().unsqueeze(1),
-                        size=x.shape[1],
-                        mode="nearest",
-                    ).squeeze(1).bool()
-            elif isinstance(block, SkipConnection1D):
-                if not skips:
-                    raise RuntimeError("skip block popped an empty skip stack")
-                x = block(x, skips.pop())                               # (B, T, d)
-                if mask is not None and mask.shape[1] != x.shape[1]:
-                    mask = F.interpolate(
-                        mask.float().unsqueeze(1),
-                        size=x.shape[1],
-                        mode="nearest",
-                    ).squeeze(1).bool()
-            else:                                                      # ConvNeXtBlock, etc.
-                x = block(x, cond, mask)                               # (B, T', d')
+                x, _ = block(x, mask, cond)
+            else:                                                   # ConvNeXtBlock
+                x = block(x, cond, mask)                            # (B, T', d')
 
-        if skips:
-            raise RuntimeError(f"{len(skips)} skip feature(s) left unused after forward")
+        x = self.final_norm(x)                                      # (B, T, hidden)
 
-        x = self.final_norm(x)                                        # (B, T, hidden)
-        x = self.out_proj(x)                                          # (B, T, latent_dim)
+        return self.out_proj(x)                                     # (B, T, latent_dim)
 
-        return x                                                      # (B, T, latent_dim)
+    # -----------
+    # Generation
+    # -----------
+
+    def _velocity(
+        self,
+        text: torch.Tensor,                                         # (1, S) long
+        x: torch.Tensor,                                            # (1, T, latent_dim)
+        t: torch.Tensor,                                            # (1,)
+        cfg_scale: float,
+    ) -> torch.Tensor:
+        """
+        One velocity evaluation at (x, t), with classifier-free guidance.
+
+        NOTE: with cfg_scale != 1 the model runs batch-doubled (conditioned +
+        null-text) and extrapolates v_uncond + cfg * (v_cond - v_uncond).
+        """
+
+        if cfg_scale == 1.0:
+            return self(text, x, t)
+
+        drop = torch.tensor([False, True], device=x.device)
+        v2 = self(text.repeat(2, 1), x.repeat(2, 1, 1), t.repeat(2), None, None, drop)
+
+        return v2[1:2] + cfg_scale * (v2[0:1] - v2[1:2])            # (1, T, latent_dim)
+
+    @torch.no_grad()
+    def sample(
+        self,
+        text: torch.Tensor,                                         # (1, S) long
+        x0: torch.Tensor,                                           # (1, T, latent_dim) distil
+        steps: int,
+        cfg_scale: float = 1.0,
+        solver: str = "euler",
+        generator: Optional[torch.Generator] = None,
+        dither: bool = True,
+    ) -> torch.Tensor:
+        """
+        Integrate the velocity field from t=0 (the source) to t=1 (data).
+
+        NOTE: euler costs one model evaluation per step, midpoint (RK2) two.
+        """
+        if solver not in self.SOLVERS:
+            raise ValueError(f"solver must be one of {self.SOLVERS}, got {solver!r}")
+
+        dt = 1.0 / steps
+        sigma = config.fm_model.source_noise if dither else 0.0
+        x = x0 if sigma <= 0.0 else x0 + sigma * torch.randn(
+            x0.shape, device=x0.device, dtype=x0.dtype, generator=generator
+        )
+
+        for i in range(steps):
+            t0 = torch.full((1,), i / steps, device=text.device)
+            if solver == "euler":
+                x = x + dt * self._velocity(text, x, t0, cfg_scale)
+            else:                                                   # midpoint (RK2)
+                x_mid = x + 0.5 * dt * self._velocity(text, x, t0, cfg_scale)
+                t_mid = torch.full((1,), (i + 0.5) / steps, device=text.device)
+                x = x + dt * self._velocity(text, x_mid, t_mid, cfg_scale)
+
+        return x                                                    # (1, T, latent_dim)

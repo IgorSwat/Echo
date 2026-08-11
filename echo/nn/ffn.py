@@ -1,4 +1,4 @@
-from echo import config
+from echo.nn.init import init_weights_
 
 import torch
 import torch.nn as nn
@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 class FeedForward(nn.Module):
     """
-    Position-wise feed-forward network (GELU-MLP or GLU variant) for Transformer blocks.
+    Position-wise feed-forward network for transformer blocks.
     """
 
     def __init__(
@@ -19,7 +19,6 @@ class FeedForward(nn.Module):
     ) -> None:
         super().__init__()
 
-		# Using GLU increases number of parameters by ~50%.
         self.use_glu = use_glu
         if use_glu:
             self.gate_up = nn.Linear(d_model, 2 * ffn_dim)
@@ -30,20 +29,13 @@ class FeedForward(nn.Module):
 
         self.drop = nn.Dropout(dropout)
 
-        self._init_weights()
+        init_weights_(self)
 
-    def _init_weights(self) -> None:
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, mean=0.0, std=config.init_std)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:             # (B, T, d_model)
         if self.use_glu:
             gate, up = self.gate_up(x).chunk(2, dim=-1)
             x = F.gelu(gate) * up
         else:
             x = F.gelu(self.up(x))
-            
-        return self.drop(self.down(x))
+
+        return self.drop(self.down(x))                              # (B, T, d_model)

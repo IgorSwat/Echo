@@ -42,37 +42,13 @@
     "head": {
       "num_layers": 2,
       "hidden_dim": 1024,
-      "dropout": 0.1,
+      "dropout": 0.2,
       "intra_frame_cond": true
     },
     "ctc": {
-      "enabled": true,
+      "enabled": true, 
       "upsample": 2
     }
-  },
-  "shortcut_model": {
-    "emb_dim": 256,
-    "d_out": 24,
-    "dropout": 0.1,
-    "blocks_per_stage": 3,
-    "stages": [
-      {
-        "kernel_size": 5,
-        "upsample": 2.0
-      },
-      {
-        "kernel_size": 7,
-        "upsample": 2.0
-      },
-      {
-        "kernel_size": 11,
-        "upsample": 1.72
-      },
-      {
-        "kernel_size": 15,
-        "upsample": 1.0
-      }
-    ]
   },
   "fm_model": {
     "text_embedding_dim": 256,
@@ -89,132 +65,21 @@
       "conv_use_norm": true
     },
     "blocks": [
-      {
-        "type": "convnext",
-        "dim_in": 24,
-        "dim_out": 64,
-        "kernel_size": 7,
-        "dropout": 0.1
-      },
-      {
-        "type": "convnext",
-        "dim_in": 64,
-        "dim_out": 64,
-        "kernel_size": 7,
-        "dropout": 0.1
-      },
-      {
-        "type": "convnext",
-        "dim_in": 64,
-        "dim_out": 128,
-        "kernel_size": 7,
-        "dropout": 0.1
-      },
-      {
-        "type": "hybrid_attention",
-        "d_model": 128,
-        "d_kv": 256,
-        "num_heads": 4,
-        "ffn_dim": 512,
-        "dropout": 0.1,
-        "use_rope": true,
-        "use_ada_ln": true
-      },
-      {
-        "type": "convnext",
-        "dim_in": 128,
-        "dim_out": 128,
-        "kernel_size": 7,
-        "dropout": 0.1
-      },
-      {
-        "type": "convnext",
-        "dim_in": 128,
-        "dim_out": 256,
-        "kernel_size": 7,
-        "dropout": 0.1
-      },
-      {
-        "type": "convnext",
-        "dim_in": 256,
-        "dim_out": 256,
-        "kernel_size": 7,
-        "dropout": 0.1
-      },
-      {
-        "type": "hybrid_attention",
-        "d_model": 256,
-        "d_kv": 256,
-        "num_heads": 8,
-        "ffn_dim": 1024,
-        "dropout": 0.1,
-        "use_rope": true,
-        "use_ada_ln": true
-      },
-      {
-        "type": "convnext",
-        "dim_in": 256,
-        "dim_out": 256,
-        "kernel_size": 7,
-        "dropout": 0.1
-      },
-      {
-        "type": "convnext",
-        "dim_in": 256,
-        "dim_out": 512,
-        "kernel_size": 7,
-        "dropout": 0.1
-      },
-      {
-        "type": "hybrid_attention",
-        "d_model": 512,
-        "d_kv": 256,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true,
-        "use_ada_ln": true
-      },
-      {
-        "type": "hybrid_attention",
-        "d_model": 512,
-        "d_kv": 256,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true,
-        "use_ada_ln": true
-      },
-      {
-        "type": "hybrid_attention",
-        "d_model": 512,
-        "d_kv": 256,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true,
-        "use_ada_ln": true
-      },
-      {
-        "type": "hybrid_attention",
-        "d_model": 512,
-        "d_kv": 256,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true,
-        "use_ada_ln": true
-      },
-      {
-        "type": "hybrid_attention",
-        "d_model": 512,
-        "d_kv": 256,
-        "num_heads": 8,
-        "ffn_dim": 2048,
-        "dropout": 0.1,
-        "use_rope": true,
-        "use_ada_ln": true
-      }
+      {"type": "convnext",          "dim_in": 24, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 64, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 64, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
+      {"type": "hybrid_attention",  "d_model": 128, "d_kv": 256, "num_heads": 4, "ffn_dim": 512, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "convnext",          "dim_in": 128, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 128, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "hybrid_attention",  "d_model": 256, "d_kv": 256, "num_heads": 8, "ffn_dim": 1024, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "convnext",          "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 256, "dim_out": 512, "kernel_size": 7, "dropout": 0.1},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true}
     ]
   },
   "training": {
@@ -241,26 +106,10 @@
       "history_mask_span_max": 5,
       "history_mask_token_frac": 0.33
     },
-    "shortcut": {
-      "data_dir": "data/ljspeech",
-      "output_dir": "checkpoints/ljspeech",
-      "batch_size": 16,
-      "num_epochs": 30,
-      "val_ratio": 0.05,
-      "learning_rate": 0.001,
-      "weight_decay": 0.01,
-      "warmup_steps": 500,
-      "grad_clip": 1.0,
-      "num_workers": 8,
-      "log_every": 20,
-      "save_every": 2,
-      "early_stop": 5,
-      "seed": 42
-    },
     "fm": {
       "data_dir": "data/ljspeech",
       "output_dir": "checkpoints/ljspeech",
-      "batch_size": 8,
+      "batch_size": 16,
       "num_epochs": 30,
       "val_ratio": 0.05,
       "learning_rate": 0.0003,

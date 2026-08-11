@@ -22,16 +22,17 @@ class TrainingConfig:
     save_every: int
     early_stop: int
     seed: int
+
     # Classifier-free guidance dropout; only the flow-matching run uses it.
     text_dropout: float = 0.0
+
     # Weight of the CTC auxiliary loss; only the autoregressive run uses it.
     ctc_weight: float = 0.0
 
     # History corruption for the autoregressive run: from
     # ``history_mask_start_epoch`` onwards, a growing fraction of the *input*
     # frames is replaced before the model reads them, so it learns to recover
-    # from a history that is not ground truth. ``history_mask_max`` of 0
-    # disables the whole schedule.
+    # from a history that is not ground truth. A max of 0 disables the schedule.
     history_mask_max: float = 0.0
     history_mask_start_epoch: int = 1
     history_mask_step: float = 0.02
@@ -39,9 +40,9 @@ class TrainingConfig:
     # interpolated from their neighbours, while real drift arrives in bursts.
     history_mask_span_min: int = 2
     history_mask_span_max: int = 5
-    # Share of corrupted frames that become the mask token; the rest are
-    # replaced by random codec tokens, which is what an AR error actually looks
-    # like — a plausible wrong frame rather than a flag saying "ignore me".
+    # Share of corrupted frames that become the mask token; the rest are replaced
+    # by random codec tokens, which is what an AR error actually looks like — a
+    # plausible wrong frame rather than a flag saying "ignore me".
     history_mask_token_frac: float = 0.3
 
 
@@ -51,21 +52,17 @@ class TrainingSections:
 
     fm: TrainingConfig
     ar: TrainingConfig
-    shortcut: TrainingConfig
 
-    # Factory method
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TrainingSections:
         return cls(
             fm=TrainingConfig(**d["fm"]),
             ar=TrainingConfig(**d["ar"]),
-            shortcut=TrainingConfig(**d["shortcut"]),
         )
 
 
 @dataclass
 class FMModelConfig:
-    # Constants
     text_embedding_dim: int
     time_embedding_dim: int
 
@@ -77,7 +74,7 @@ class FMModelConfig:
     # averaged. Inference must use the same value.
     source_noise: float
 
-    # Text encoder (Conformer) structural params
+    # Text encoder (Conformer)
     text_encoder_num_layers: int
     text_encoder_num_heads: int
     text_encoder_ffn_dim: int
@@ -87,11 +84,10 @@ class FMModelConfig:
     text_encoder_use_rope: bool
     text_encoder_conv_use_norm: bool
 
-    # Main processing blocks. Each entry is a dict with a "type" key
-    # ("convnext" | "self_attention" | "cross_attention") plus block-specific params.
+    # Main processing stack. Each entry is a dict with a "type" key naming a
+    # block in EchoFM.BLOCK_REGISTRY, plus that block's own parameters.
     blocks: list[dict[str, Any]]
 
-    # Factory method
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FMModelConfig:
         te = d["text_encoder"]
@@ -113,11 +109,10 @@ class FMModelConfig:
 
 @dataclass
 class ARModelConfig:
-    # Constants
     emb_dim: int
     hidden_dim: int
 
-    # Text encoder (Conformer) structural params
+    # Text encoder (Conformer)
     text_encoder_d_model: int
     text_encoder_num_layers: int
     text_encoder_num_heads: int
@@ -157,7 +152,6 @@ class ARModelConfig:
     ctc_enabled: bool = False
     ctc_upsample: int = 2
 
-    # Factory method
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ARModelConfig:
         te, dec, hd = d["text_encoder"], d["decoder"], d["head"]
@@ -191,32 +185,6 @@ class ARModelConfig:
 
 
 @dataclass
-class ShortcutModelConfig:
-    # Per-token-layer embedding width; the trunk runs at 2*emb_dim.
-    emb_dim: int
-    d_out: int
-    dropout: float
-
-    # ConvNeXt blocks per stage.
-    blocks_per_stage: int
-
-    # One entry per stage: (kernel_size, upsampling factor applied *after*
-    # that stage's blocks; 1.0 means no interpolation).
-    stages: list[tuple[int, float]]
-
-    # Factory method
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> ShortcutModelConfig:
-        return cls(
-            emb_dim=d["emb_dim"],
-            d_out=d["d_out"],
-            dropout=d["dropout"],
-            blocks_per_stage=d["blocks_per_stage"],
-            stages=[(s["kernel_size"], float(s["upsample"])) for s in d["stages"]],
-        )
-
-
-@dataclass
 class EchoConfig:
     # Constants shared by every model
     latent_dim: int
@@ -240,19 +208,11 @@ class EchoConfig:
     prosody_eos: int
     prosody_mask: int
 
-    # Flow-matching model (EchoFM)
+    # Per-model architecture, then per-model training hyperparameters
     fm_model: FMModelConfig
-
-    # Autoregressive prosody model (EchoAR)
     ar_model: ARModelConfig
-
-    # Mimi tokens -> Blue latent shortcut model (EchoShortcut)
-    shortcut_model: ShortcutModelConfig
-
-    # Training hyperparameters, per model
     training: TrainingSections
 
-    # Factory method
     @classmethod
     def from_json(cls, path: str | Path) -> EchoConfig:
         with open(path, encoding="utf-8") as f:
@@ -272,7 +232,6 @@ class EchoConfig:
             prosody_mask=d["special_tokens"]["prosody_mask"],
             fm_model=FMModelConfig.from_dict(d["fm_model"]),
             ar_model=ARModelConfig.from_dict(d["ar_model"]),
-            shortcut_model=ShortcutModelConfig.from_dict(d["shortcut_model"]),
             training=TrainingSections.from_dict(d["training"]),
         )
 

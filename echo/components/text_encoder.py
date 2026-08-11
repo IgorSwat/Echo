@@ -1,6 +1,6 @@
 from echo import config
 
-from echo.modules.conformer import Conformer
+from echo.nn.conformer import Conformer
 
 from typing import Optional
 
@@ -10,7 +10,7 @@ import torch.nn as nn
 
 class TextEncoder(nn.Module):
     """
-    Text encoder: token embeddings -> Conformer -> optional projection to D_out.
+    Text encoder: token embeddings -> Conformer -> optional projection to d_out.
     """
 
     def __init__(
@@ -45,12 +45,12 @@ class TextEncoder(nn.Module):
             max_seq_len=max_seq_len,
         )
 
-		# Additional linear projection in case the output dimension should be different.
         self.proj = nn.Linear(d_model, d_out) if d_out != d_model else None
 
         self._init_weights()
 
     def _init_weights(self) -> None:
+        # Only the embedding and projection: the Conformer initialized itself.
         nn.init.normal_(self.embed.weight, mean=0.0, std=config.init_std)
         if self.proj is not None:
             nn.init.normal_(self.proj.weight, mean=0.0, std=config.init_std)
@@ -61,10 +61,10 @@ class TextEncoder(nn.Module):
         x: torch.Tensor,                                            # (B, T) long
         key_padding_mask: Optional[torch.Tensor] = None,            # (B, T) or None
     ) -> torch.Tensor:
-        x = self.embed(x)                                              # (B, T, D)
-        x = self.conformer(x, key_padding_mask)                        # (B, T, D)
-        
-        if self.proj is not None:
-            x = self.proj(x)                                           # (B, T, d_out)
+        x = self.embed(x)                                           # (B, T, d_model)
+        x = self.conformer(x, key_padding_mask)                     # (B, T, d_model)
 
-        return x                                                     # (B, T, d_out)
+        if self.proj is not None:
+            x = self.proj(x)                                        # (B, T, d_out)
+
+        return x                                                    # (B, T, d_out)

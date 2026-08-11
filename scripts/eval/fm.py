@@ -1,105 +1,100 @@
 #!/usr/bin/env python3
-"""Evaluate an EchoFM checkpoint and write the results to JSON for later comparison.
+"""Evaluate an EchoFM checkpoint and write the results to JSON for comparison.
 
-The conditioning is rebuilt from the codecs every run rather than read from a
-``distils`` directory, so a result stays reproducible no matter which distils
-happen to be on disk at the time:
+The conditioning is rebuilt from the codecs every run rather than read off disk,
+so a result stays reproducible whatever distils happen to be around:
 
     clean  ground-truth codec -> Mimi -> BlueCodec      (in-distribution, oracle)
     ar     free-running EchoAR -> Mimi -> BlueCodec     (what the pipeline gets)
 
-The distil is the transport's starting state, so it is fed to the sampler as
-``x0``; a run is deterministic given the distil.
-
-Both are scored, because a checkpoint can look strong on the oracle input and
-still regress on the real one — the gap between the two *is* the train/inference
-mismatch, so it is reported rather than averaged away.
-
-Three fixed anchors are measured every run (the recording, its BlueCodec round
-trip, and the conditioning decoded on its own). They make results from different
-days comparable even if the ASR model or the codec changes underneath.
+Both are scored: a checkpoint can look strong on the oracle input and regress on
+the real one, and that gap *is* the train/inference mismatch. Three fixed anchors
+(the recording, its codec round trip, the conditioning alone) keep runs from
+different days comparable even if the ASR model or codec changes underneath.
 
 Usage:
-    python scripts/eval_fm.py --model checkpoints/ljspeech/echo_fm_best.pt --tag baseline
-    python scripts/eval_fm.py --model ... --tag bridge --norm instance
-    python scripts/eval_fm.py --compare checkpoints/ljspeech/eval/*.json
+    python scripts/eval/fm.py --model checkpoints/ljspeech/echo_fm_best.pt --tag baseline
+    python scripts/eval/fm.py --model ... --tag bridge --norm instance
+    python scripts/eval/fm.py --compare checkpoints/ljspeech/eval/*.json
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# The shared helpers (__common__, __style__, ...) sit one level up, in scripts/.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import subprocess
-import sys
 import warnings
 from datetime import datetime, timezone
-from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-_SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+import librosa
+import numpy as np
+import torch
+import torchaudio
+from scipy import linalg
+from torch.utils.data import random_split
 
-import librosa  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-import torchaudio  # noqa: E402
-from scipy import linalg  # noqa: E402
-from torch.utils.data import random_split  # noqa: E402
-
-from __style__ import (  # noqa: E402
-    Colors, print_header, print_info, print_section, print_separator,
+from __common__ import (
+    BLUE_SR,
+    MIMI_FPS,
+    MIMI_SR,
+    REPO_ROOT,
+    decode_mimi,
+    load_checkpoint,
+    load_pairs_csv,
+    load_tokenizer,
+    select_device,
 )
+from __eval__ import ASR, edit_ops, normalize_text
+from __style__ import Colors, print_header, print_info, print_section, print_separator
 
-from echo import config  # noqa: E402
-from echo.ar_model import EchoAR  # noqa: E402
-from echo.fm_model import EchoFM  # noqa: E402
-from echo.tokenizer import Tokenizer  # noqa: E402
-
-from run_ar import _decode_codes  # noqa: E402
-from run_fm import _generate  # noqa: E402
-from eval_ar import _ASR, _edit_ops, _normalize_text  # noqa: E402
-
-_MIMI_SR, _BLUE_SR, _MIMI_FPS = 24000, 44100, 12.5
+from echo import config
+from echo.ar_model import EchoAR
+from echo.fm_model import EchoFM
 
 # Sampler settings scored on every run. Keeping the list fixed is what lets two
 # checkpoints be compared at matching settings later; each model can still be
 # read at its own best row.
 _CONFIGS = [
-    {"name": "s8",        "steps": 8,  "cfg": 1.0},
-    {"name": "s16",       "steps": 16, "cfg": 1.0},
-    {"name": "s32",       "steps": 32, "cfg": 1.0},
-    {"name": "s8_cfg3",   "steps": 8,  "cfg": 3.0},
-    {"name": "s8_mid",    "steps": 8,  "cfg": 1.0, "solver": "midpoint"},
+    {"name": "s8",      "steps": 8,  "cfg": 1.0},
+    {"name": "s16",     "steps": 16, "cfg": 1.0},
+    {"name": "s32",     "steps": 32, "cfg": 1.0},
+    {"name": "s8_cfg3", "steps": 8,  "cfg": 3.0},
+    {"name": "s8_mid",  "steps": 8,  "cfg": 1.0, "solver": "midpoint"},
 ]
 
+_ANCHORS = ("real", "codec_roundtrip", "ar_stage", "conditioning_clean", "conditioning_ar")
 
-def _select_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
+# ---------
+# Metrics
+# ---------
 
 def _mel(w: np.ndarray, sr: int) -> np.ndarray:
     """Log-mel with a *fixed* reference, so values compare across runs."""
-    if sr != _BLUE_SR:
-        w = librosa.resample(np.asarray(w, np.float32), orig_sr=sr, target_sr=_BLUE_SR)
-    spec = librosa.feature.melspectrogram(y=np.asarray(w, np.float32), sr=_BLUE_SR,
-                                          n_mels=80, hop_length=256)
+    if sr != BLUE_SR:
+        w = librosa.resample(np.asarray(w, np.float32), orig_sr=sr, target_sr=BLUE_SR)
+    spec = librosa.feature.melspectrogram(
+        y=np.asarray(w, np.float32), sr=BLUE_SR, n_mels=80, hop_length=256
+    )
+
     return librosa.power_to_db(spec, ref=1e-6)
 
 
 def _mel_dist(a: np.ndarray, sr_a: int, b: np.ndarray, dtw: bool) -> float:
     """Mean absolute log-mel difference; DTW-aligned when timing is free-running."""
-    A, B = _mel(a, sr_a), _mel(b, _BLUE_SR)
+    A, B = _mel(a, sr_a), _mel(b, BLUE_SR)
     if dtw:
         _, wp = librosa.sequence.dtw(A, B, metric="euclidean")
         return float(np.mean([np.abs(A[:, i] - B[:, j]).mean() for i, j in wp]))
+
     T = min(A.shape[1], B.shape[1])
+
     return float(np.abs(A[:, :T] - B[:, :T]).mean())
 
 
@@ -108,35 +103,37 @@ def _frechet(A: np.ndarray, B: np.ndarray) -> float:
     mu1, mu2 = A.mean(0), B.mean(0)
     c1, c2 = np.cov(A, rowvar=False), np.cov(B, rowvar=False)
     cc, _ = linalg.sqrtm(c1.dot(c2), disp=False)
+
     return float(((mu1 - mu2) ** 2).sum() + np.trace(c1 + c2 - 2 * np.real(cc)))
 
 
 def _feats(a: np.ndarray) -> np.ndarray:
     """Frames stacked with their first differences: marginals *and* temporal detail."""
+
     return np.concatenate([a[1:], a[1:] - a[:-1]], axis=1)
 
 
 def _git_commit() -> str:
     try:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
-                                       cwd=_REPO_ROOT, text=True).strip()
-    except Exception:  # noqa: BLE001
+                                       cwd=REPO_ROOT, text=True).strip()
+    except Exception:                                                # noqa: BLE001
         return "unknown"
 
 
 def _val_files(num: int) -> list[str]:
     """The first `num` files of the flow-matching val split, deterministically."""
-    lines = [l.strip() for l in open(_REPO_ROOT / config.training.fm.data_dir / "phonemes.csv",
-                                     encoding="utf-8") if l.strip()]
-    names = [l.split("|")[0] for l in lines]
+    cfg = config.training.fm
+    names = [name for name, _ in load_pairs_csv(REPO_ROOT / cfg.data_dir / "phonemes.csv")]
     n = len(names)
-    val_len = int(n * config.training.fm.val_ratio)
+    val_len = int(n * cfg.val_ratio)
     _, va = random_split(range(n), [n - val_len, val_len],
-                         generator=torch.Generator().manual_seed(config.training.fm.seed))
+                         generator=torch.Generator().manual_seed(cfg.seed))
+
     return [names[i] for i in list(va)[:num]]
 
 
-def main() -> None:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate an EchoFM checkpoint.")
     parser.add_argument("--model", type=str, help="Path to an EchoFM checkpoint (.pt).")
     parser.add_argument("--ar-model", type=str,
@@ -161,24 +158,31 @@ def main() -> None:
                         help="Print a comparison of existing result JSONs and exit.")
     args = parser.parse_args()
 
+    if not args.compare and not args.model:
+        parser.error("--model is required (or use --compare)")
+
+    return args
+
+
+def main() -> None:
+    args = _parse_args()
+
     if args.compare:
         _print_comparison(args.compare)
         return
-    if not args.model:
-        parser.error("--model is required (or use --compare)")
 
     warnings.filterwarnings("ignore")
-    device = _select_device()
+    device = select_device()
     norm = args.norm or config.latent_norm
     tag = args.tag or Path(args.model).stem
-    out_dir = Path(args.out_dir) if args.out_dir else \
-        _REPO_ROOT / config.training.fm.output_dir / "eval"
+    out_dir = (Path(args.out_dir) if args.out_dir
+               else REPO_ROOT / config.training.fm.output_dir / "eval")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    from bluecodec import BlueCodec                                   # noqa: PLC0415
-    from transformers import MimiModel                                # noqa: PLC0415
+    from bluecodec import BlueCodec                                  # noqa: PLC0415
+    from transformers import MimiModel                               # noqa: PLC0415
 
-    data_dir = _REPO_ROOT / config.training.fm.data_dir
+    data_dir = REPO_ROOT / config.training.fm.data_dir
     print_header("EchoFM - Evaluation")
     print_separator()
     print_section("Setup")
@@ -191,31 +195,29 @@ def main() -> None:
                + ("" if args.norm else "  (from config; pass --norm if the checkpoint differs)"),
                Colors.OKCYAN if args.norm else Colors.WARNING)
 
+    # --- Data ---------------------------------------------------------------
     stats = np.load(data_dir / "latents/latent_stats.npz")
     d_mean = torch.tensor(stats["mean"], device=device).float().view(1, 1, -1)
     d_std = torch.tensor(stats["std"], device=device).float().view(1, 1, -1)
 
-    lines = [l.strip() for l in open(data_dir / "phonemes.csv", encoding="utf-8") if l.strip()]
-    phon = {l.split("|")[0]: l.split("|", 1)[1] for l in lines}
-    transcripts = {l.split("|")[0].replace(".wav", ""): l.strip().split("|")[-1]
-                   for l in open(data_dir / "metadata.csv", encoding="utf-8")}
+    phon = dict(load_pairs_csv(data_dir / "phonemes.csv"))
+    transcripts = {name.replace(".wav", ""): text
+                   for name, text in load_pairs_csv(data_dir / "metadata.csv")}
     files = _val_files(args.num_files)
-    print_info("Utterances", f"{len(files)} from the val split (seed {config.training.fm.seed})")
+    print_info("Utterances",
+               f"{len(files)} from the val split (seed {config.training.fm.seed})")
 
-    tokenizer = Tokenizer(_REPO_ROOT / "models" / "phoneme_vocab.json")
+    # --- Models -------------------------------------------------------------
+    tokenizer = load_tokenizer()
     fm = EchoFM().to(device).eval()
-    ckpt = torch.load(args.model, map_location=device)
-    missing, unexpected = fm.load_state_dict(ckpt.get("model", ckpt), strict=False)
-    if missing or unexpected:
-        print_info("State dict", f"{len(missing)} missing, {len(unexpected)} unexpected",
-                   Colors.WARNING)
+    ckpt = load_checkpoint(fm, args.model, device, "EchoFM", strict=False)
     ar = EchoAR().to(device).eval()
-    ar_ckpt = torch.load(_REPO_ROOT / args.ar_model, map_location=device)
-    ar.load_weights(ar_ckpt.get("model", ar_ckpt))
+    load_checkpoint(ar, REPO_ROOT / args.ar_model, device, "EchoAR")
     mimi = MimiModel.from_pretrained("kyutai/mimi").to(device).eval()
     blue = BlueCodec.from_pretrained("notmax123/blue-codec", device=str(device))
-    asr = _ASR("auto", None, "en", device)
-    print_info("Trained", f"epoch {ckpt.get('epoch', '?')}, val_loss {ckpt.get('val_loss', float('nan')):.4f}")
+    asr = ASR("auto", None, "en", device)
+    print_info("Trained", f"epoch {ckpt.get('epoch', '?')}, "
+                          f"val_loss {ckpt.get('val_loss', float('nan')):.4f}")
 
     def normalize(raw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(normalized, mean, std) — instance mode takes its numbers from the distil."""
@@ -224,8 +226,10 @@ def main() -> None:
             s = raw.std(dim=-2, keepdim=True).clamp_min(1e-5)
         else:
             m, s = d_mean, d_std
+
         return (raw - m) / s, m, s
 
+    # --- Score --------------------------------------------------------------
     per_file: list[dict] = []
     pools: dict[str, list[np.ndarray]] = {}
     target_pool: list[np.ndarray] = []
@@ -234,8 +238,8 @@ def main() -> None:
     for idx, name in enumerate(files):
         stem = name.replace(".npz", "")
         row: dict = {"stem": stem}
-        real, _ = librosa.load(str(data_dir / "audio" / f"{stem}.wav"), sr=_BLUE_SR, mono=True)
-        ref_words = _normalize_text(transcripts.get(stem, ""))
+        real, _ = librosa.load(str(data_dir / "audio" / f"{stem}.wav"), sr=BLUE_SR, mono=True)
+        ref_words = normalize_text(transcripts.get(stem, ""))
         row["ref_words"] = len(ref_words)
 
         with np.load(data_dir / "latents" / name) as z:
@@ -246,54 +250,55 @@ def main() -> None:
         text_ids = torch.tensor([tokenizer.tokenize(phon[name])], dtype=torch.long, device=device)
 
         def score(wav: np.ndarray, sr: int, dtw: bool) -> dict:
-            hyp = _normalize_text(asr.transcribe(wav, sr))
-            s_, d_, i_ = _edit_ops(ref_words, hyp)
+            hyp = normalize_text(asr.transcribe(wav, sr))
+            s_, d_, i_ = edit_ops(ref_words, hyp)
             return {"sub": s_, "del": d_, "ins": i_,
                     "wer": (s_ + d_ + i_) / max(len(ref_words), 1),
                     "mel": _mel_dist(wav, sr, real, dtw)}
 
         with torch.no_grad():
-            # --- anchors, so results stay comparable across days ---------------
-            row["anchor_real"] = score(real, _BLUE_SR, False)
+            # --- anchors, so results stay comparable across days -------------
+            row["anchor_real"] = score(real, BLUE_SR, False)
             rt = blue.decode(blue.encode(torch.from_numpy(real)[None].to(device)))
             row["anchor_codec_roundtrip"] = score(rt.reshape(-1).float().cpu().numpy(),
-                                                  _BLUE_SR, False)
+                                                  BLUE_SR, False)
 
-            # --- conditioning: clean (oracle) and AR (the real pipeline) -------
-            clean_wav = _decode_codes(mimi, gt_codes)
+            # --- conditioning: clean (oracle) and AR (the real pipeline) -----
+            clean_wav = decode_mimi(mimi, gt_codes)
             clean_raw = blue.encode(torchaudio.functional.resample(
-                clean_wav, _MIMI_SR, _BLUE_SR)[..., : len(real)]).transpose(1, 2).float()
+                clean_wav, MIMI_SR, BLUE_SR)[..., : len(real)]).transpose(1, 2).float()
 
             ar_codes = ar.generate(text_ids, max_frames=1000)
             ar_frames = int(ar_codes.shape[1])
-            ar_wav = _decode_codes(mimi, ar_codes.transpose(1, 2))
+            ar_wav = decode_mimi(mimi, ar_codes.transpose(1, 2))
             ar_raw = blue.encode(torchaudio.functional.resample(
-                ar_wav, _MIMI_SR, _BLUE_SR)).transpose(1, 2).float()
+                ar_wav, MIMI_SR, BLUE_SR)).transpose(1, 2).float()
             row["ar_frames"], row["gt_frames"] = ar_frames, int(gt_codes.shape[2])
             row["anchor_ar_stage"] = score(ar_wav.reshape(-1).float().cpu().numpy(),
-                                           _MIMI_SR, True)
+                                           MIMI_SR, True)
 
             for src, raw, dtw in (("clean", clean_raw, False), ("ar", ar_raw, True)):
                 cond, m, s = normalize(raw)
                 row[f"anchor_conditioning_{src}"] = score(
                     blue.decode(raw.transpose(1, 2)).reshape(-1).float().cpu().numpy(),
-                    _BLUE_SR, dtw)
+                    BLUE_SR, dtw)
 
-                if src == "clean":                       # aligned: latent metrics are meaningful
+                if src == "clean":              # aligned: latent metrics are meaningful
                     tgt = (target_raw.transpose(1, 2) - m) / s
                     T = min(tgt.shape[1], cond.shape[1])
                     target_pool.append(_feats(tgt[0, :T].cpu().numpy()))
 
                 for spec in _CONFIGS:
                     gen = torch.Generator(device=device).manual_seed(args.seed)
-                    out = _generate(fm, text_ids, cond, spec["steps"], spec["cfg"],
+                    out = fm.sample(text_ids, cond, spec["steps"], spec["cfg"],
                                     spec.get("solver", "euler"), generator=gen)
                     wav = blue.decode((out * s + m).transpose(1, 2)).reshape(-1)
                     wav = wav.float().cpu().numpy()
-                    if src == "ar":                      # trim to what the AR actually produced
-                        wav = wav[: int(ar_frames / _MIMI_FPS * _BLUE_SR)]
+                    if src == "ar":             # trim to what the AR actually produced
+                        wav = wav[: int(ar_frames / MIMI_FPS * BLUE_SR)]
+
                     key = f"{src}__{spec['name']}"
-                    row[key] = score(wav, _BLUE_SR, dtw)
+                    row[key] = score(wav, BLUE_SR, dtw)
                     if src == "clean":
                         o = out[0, :T].cpu().numpy()
                         row[key]["latent_mse"] = float(((out[:, :T] - tgt[:, :T]) ** 2).mean())
@@ -301,9 +306,10 @@ def main() -> None:
                         row[key]["std"] = float(o.std())
                         pools.setdefault(key, []).append(_feats(o))
                     if args.save_audio:
-                        import soundfile as sf                        # noqa: PLC0415
+                        import soundfile as sf                       # noqa: PLC0415
+
                         (out_dir / tag).mkdir(exist_ok=True)
-                        sf.write(str(out_dir / tag / f"{stem}_{key}.wav"), wav, _BLUE_SR)
+                        sf.write(str(out_dir / tag / f"{stem}_{key}.wav"), wav, BLUE_SR)
 
         per_file.append(row)
         print_info(f"[{idx + 1}/{len(files)}] {stem}",
@@ -311,7 +317,7 @@ def main() -> None:
                    f"clean/s8 {row['clean__s8']['wer']:.3f} | "
                    f"ar/s8 {row['ar__s8']['wer']:.3f}")
 
-    # --- aggregate ---------------------------------------------------------
+    # --- Aggregate ----------------------------------------------------------
     total_words = sum(r["ref_words"] for r in per_file)
     X = np.concatenate(target_pool, 0)
     dX = float(np.concatenate([t[:, 24:] for t in target_pool], 0).std())
@@ -332,8 +338,7 @@ def main() -> None:
             out["std_ratio"] = float(np.mean([r["std"] for r in rows])) / sX
         return out
 
-    keys = ([f"anchor_{k}" for k in ("real", "codec_roundtrip", "ar_stage",
-                                     "conditioning_clean", "conditioning_ar")]
+    keys = ([f"anchor_{k}" for k in _ANCHORS]
             + [f"{src}__{c['name']}" for src in ("clean", "ar") for c in _CONFIGS])
     summary = {k: agg(k) for k in keys}
 
@@ -370,9 +375,7 @@ def main() -> None:
 def _print_comparison(paths: list[str]) -> None:
     """Side-by-side of saved runs, aligned by sampler *spec* rather than by name.
 
-    Two checkpoints may name their sampler settings differently — a run whose
-    transport starts from noise and one that starts from the distil describe the
-    same 8-step, cfg-1 operating point with different labels. Matching on
+    Two checkpoints may name their sampler settings differently, so matching on
     (steps, cfg, solver) compares equal compute on each model's own transport,
     which is the honest pairing; rows without a counterpart are listed apart.
     """
@@ -382,6 +385,7 @@ def _print_comparison(paths: list[str]) -> None:
         print_info(r["tag"], f"{r['checkpoint']}  (epoch {r['epoch']}, "
                              f"val_loss {r['val_loss']:.4f}, norm {r['normalization']}, "
                              f"{r['num_files']} files, commit {r['git_commit']})")
+
     base = runs[0]
     for r in runs[1:]:
         if r["files"] != base["files"]:
@@ -390,22 +394,23 @@ def _print_comparison(paths: list[str]) -> None:
 
     def spec_key(c: dict) -> tuple:
         # `init` is deliberately not part of the key: where the transport starts
-        # is the model's architecture, not a knob, so a noise-source and a
-        # distil-source checkpoint are compared at equal compute on their own
-        # native transport. `start_t` *is* included — it marks a deliberately
-        # off-distribution run, which must not be matched to a native one.
+        # is the model's architecture, not a knob. `start_t` *is* included — it
+        # marks a deliberately off-distribution run.
         return (c["steps"], c["cfg"], c.get("solver", "euler"), c.get("start_t", 0.0))
 
-    # anchors first: identical inputs, so any movement is measurement noise
+    # Anchors first: identical inputs, so any movement is measurement noise.
     anchors = [k for k in base["summary"] if k.startswith("anchor_")]
-    rows: list[tuple[str, list[str | None]]] = [(a, [a if a in r["summary"] else None for r in runs])
-                                                for a in anchors]
+    rows: list[tuple[str, list[str | None]]] = [
+        (a, [a if a in r["summary"] else None for r in runs]) for a in anchors
+    ]
     shared, unmatched = [], []
     for c in base["sampler_configs"]:
         for src in ("clean", "ar"):
             keys = []
             for r in runs:
-                match = next((rc for rc in r["sampler_configs"] if spec_key(rc) == spec_key(c)), None)
+                match = next(
+                    (rc for rc in r["sampler_configs"] if spec_key(rc) == spec_key(c)), None
+                )
                 keys.append(f"{src}__{match['name']}" if match else None)
             label = f"{src} · {c['steps']} steps, cfg {c['cfg']:g}, {c.get('solver', 'euler')}"
             (shared if all(keys) else unmatched).append((label, keys))
@@ -415,15 +420,19 @@ def _print_comparison(paths: list[str]) -> None:
     for metric in ("wer", "mel", "frechet", "detail_ratio"):
         printed = False
         for label, keys in rows:
-            vals = [r["summary"].get(k, {}).get(metric) if k else None for k, r in zip(keys, runs)]
+            vals = [r["summary"].get(k, {}).get(metric) if k else None
+                    for k, r in zip(keys, runs)]
             if all(v is None or (isinstance(v, float) and np.isnan(v)) for v in vals):
                 continue
             if not printed:
                 print_section(metric)
                 print(f"  {'':38s}" + "".join(f"{r['tag']:>{width}s}" for r in runs))
                 printed = True
-            cells = "".join(f"{(v if v is not None else float('nan')):>{width}.3f}" for v in vals)
+            cells = "".join(
+                f"{(v if v is not None else float('nan')):>{width}.3f}" for v in vals
+            )
             print(f"  {label:38s}{cells}")
+
     if unmatched:
         print_section("no counterpart (listed for reference)")
         for label, keys in unmatched:

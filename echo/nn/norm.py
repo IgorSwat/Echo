@@ -6,12 +6,9 @@ import torch.nn as nn
 
 class AdaLN(nn.Module):
     """
-    Adaptive Layer Normalization with a residual gate (AdaLN-Zero style).
+    Adaptive layer norm with a residual gate (AdaLN-Zero).
 
-    Normalizes `x`, applies conditioning-dependent affine modulation (gamma, beta),
-    and predicts a per-channel residual gate. Modulation is zero-initialized so
-    gamma=0 (scale 1), beta=0, gate=0 at start — residual branches that multiply
-    by the gate begin as identity.
+    AdaLN-Zero: x + gate(c) * (scale(c) * LayerNorm(x) + shift(c))
     """
 
     def __init__(self, dim: int, cond_dim: int) -> None:
@@ -36,18 +33,15 @@ class AdaLN(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         gamma, beta, gate = self.modulation(cond).chunk(3, dim=-1)  # each (B, dim)
 
-        x = self.norm(x)                                               # (B, T, dim)
-        x = x * (1 + gamma[:, None, :]) + beta[:, None, :]              # (B, T, dim)
+        x = self.norm(x)                                            # (B, T, dim)
+        x = x * (1 + gamma[:, None, :]) + beta[:, None, :]          # (B, T, dim)
 
-        return x, gate                                                 # (B, T, dim), (B, dim)
+        return x, gate                                              # (B, T, dim), (B, dim)
 
 
 class ConditionalLayerNorm(nn.Module):
     """
-    Layer norm that optionally applies AdaLN modulation conditioned on `cond`.
-    When `use_ada_ln` is False, falls back to a plain LayerNorm and `cond` is ignored.
-    Always returns (x, gate) so callers can apply AdaLN-Zero residual gating;
-    gate is ones when AdaLN is disabled.
+    A switch which can route to both standard LayerNorm and AdaLN.
     """
 
     def __init__(
@@ -68,11 +62,11 @@ class ConditionalLayerNorm(nn.Module):
     def forward(
         self,
         x: torch.Tensor,                                            # (B, T, dim)
-        cond: Optional[torch.Tensor] = None,                         # (B, cond_dim) or None
+        cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.use_ada_ln:
-            return self.norm(x, cond)                                # (B, T, dim), (B, dim)
+            return self.norm(x, cond)                               # (B, T, dim), (B, dim)
 
         gate = torch.ones(x.shape[0], x.shape[-1], device=x.device, dtype=x.dtype)
-        
-        return self.norm(x), gate                                    # (B, T, dim), (B, dim)
+
+        return self.norm(x), gate                                   # (B, T, dim), (B, dim)

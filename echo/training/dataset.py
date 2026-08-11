@@ -11,69 +11,18 @@ from echo.tokenizer import Tokenizer
 
 class EchoDataset(Dataset):
     """
-    Dataset of text tokens paired with any combination of audio latents, distil
-    latents and discrete codec tokens.
+    Text tokens paired with audio latents, distil latents and/or codec tokens.
 
-    Each field is loaded only when its ``load_*`` flag is set, so a training run
-    pays for what it uses: flow matching wants ``latent`` + ``distil``, the
-    autoregressive model wants ``codec``. Samples are returned as dicts holding
-    exactly the enabled fields.
+    Latents are channel-normalized so the data matches the unit-Gaussian prior
+    flow matching assumes. `norm_mode` picks where the statistics come from:
 
-    Audio latents are **channel-normalized**, so each of the ``latent_dim``
-    channels is approximately zero-mean unit-variance and the data distribution
-    lines up with the unit-Gaussian noise prior used in flow matching. Codec
-    tokens are discrete and are never normalized.
-
-    ``norm_mode`` picks where the statistics come from:
-
-    ``"dataset"``
-        Per-channel mean and std for the whole corpus, loaded from a
-        ``latent_stats.npz`` file (produced by
-        ``scripts/compute_latent_stats.py``). One fixed affine map for every
-        utterance; the same file denormalizes latents at inference.
-
-    ``"instance"``
-        Per-channel mean and std of the utterance itself, computed over its own
-        time axis, which removes whatever level and channel-balance drift there
-        is between utterances before the model ever sees it.
-
-        Both streams are normalized by the **distil's** statistics, not each by
-        its own. Denormalizing a generated latent needs statistics that exist at
-        inference time, and the distil's are the only ones that do; scaling the
-        target by its own would make the mapping un-invertible. Inference must
-        use :meth:`instance_stats` on the distil and apply its inverse to the
-        model output.
-
-    Note that instance mode is only coherent for a run whose target is the audio
-    latent — the flow-matching one. The shortcut model *predicts* the distil, so
-    normalizing it by its own statistics would hide the very quantity it has to
-    output; that run should stay on ``"dataset"``.
-
-    Note that latents and codec tokens live on different temporal grids (the
-    codec stream is considerably coarser), so their lengths are tracked and
-    padded independently.
-
-    Args:
-        phonemes_csv: path to a CSV file with lines ``<npz_file>|<phoneme_string>``.
-        latent_dir: directory containing ``.npz`` latent files (key ``latents``,
-            shape ``(C, T)``).
-        distils_dir: directory containing ``.npz`` distil latent files.
-        tokenizer: :class:`Tokenizer` instance for phoneme → token conversion.
-        latent_stats: optional path to a ``latent_stats.npz`` file containing
-            ``mean`` and ``std`` arrays of shape ``(latent_dim,)``. When
-            provided, latents are z-scored per channel on load. Defaults to
-            ``<latent_dir>/latent_stats.npz`` if that file exists, otherwise
-            no normalization is applied.
-        codec_dir: directory containing ``.npz`` codec files (key ``codes``,
-            shape ``(num_layers, T)`` of integer token ids).
-        codec_layers: how many leading codebook layers to keep (default 2).
-        load_latent / load_distil / load_codec: per-field switches. A field that
-            is enabled requires its directory to be given.
+      "dataset"   corpus-wide mean/std, read from `latent_stats.npz`.
+      "instance"  the utterance's own, taken from the *distil* — at inference the
+                  distil is the only tensor that exists, so only its statistics
+                  can invert the model's output.
     """
 
-    # npz payload keys.
-    LATENT_KEY = "latents"
-    CODEC_KEY = "codes"
+    NORM_MODES = ("dataset", "instance")
 
     def __init__(
         self,
@@ -89,82 +38,100 @@ class EchoDataset(Dataset):
         load_codec: bool = True,
         norm_mode: str = "dataset",
     ) -> None:
+        if norm_mode not in self.NORM_MODES:
+            raise ValueError(f"norm_mode must be one of {self.NORM_MODES}, got {norm_mode!r}")
+        if codec_layers < 1:
+            raise ValueError(f"codec_layers must be >= 1, got {codec_layers}")
+
         self._tokenizer = tokenizer
         self._codec_layers = codec_layers
-
-        if norm_mode not in ("dataset", "instance"):
-            raise ValueError(f"norm_mode must be 'dataset' or 'instance', got {norm_mode!r}")
         self._norm_mode = norm_mode
 
-        self._load_latent = load_latent
-        self._load_distil = load_distil
-        self._load_codec = load_codec
-
-        self._latent_dir = Path(latent_dir) if latent_dir is not None else None
-        self._distils_dir = Path(distils_dir) if distils_dir is not None else None
-        self._codec_dir = Path(codec_dir) if codec_dir is not None else None
-
-        # An enabled field without a directory is a configuration error, not
-        # something to silently skip.
+        # Each field maps to the directory it loads from, or None when disabled.
+        self._dirs: dict[str, Path | None] = {}
         for name, enabled, directory in (
-            ("latent", load_latent, self._latent_dir),
-            ("distil", load_distil, self._distils_dir),
-            ("codec", load_codec, self._codec_dir),
+            ("latent", load_latent, latent_dir),
+            ("distil", load_distil, distils_dir),
+            ("codec", load_codec, codec_dir),
         ):
             if enabled and directory is None:
                 raise ValueError(
                     f"{name} loading is enabled but no directory was given; "
                     f"pass {name}_dir=... or load_{name}=False"
                 )
-        if codec_layers < 1:
-            raise ValueError(f"codec_layers must be >= 1, got {codec_layers}")
+            self._dirs[name] = Path(directory) if enabled else None
 
-        # Resolve the stats path: explicit argument, else default location.
-        if latent_stats is not None:
-            stats_path = Path(latent_stats)
-        elif self._latent_dir is not None:
-            stats_path = self._latent_dir / "latent_stats.npz"
-        else:
-            stats_path = None
+        self._stats = self._load_stats(latent_stats)
+        self._samples = self._load_index(Path(phonemes_csv))
 
-        self._latent_mean: torch.Tensor | None = None
-        self._latent_std: torch.Tensor | None = None
-        if stats_path is not None and stats_path.is_file():
-            stats = np.load(stats_path)
-            self._latent_mean = torch.from_numpy(stats["mean"].astype(np.float32))  # (C,)
-            self._latent_std = torch.from_numpy(stats["std"].astype(np.float32))    # (C,)
+    # ---------
+    # Indexing
+    # ---------
 
-        self._samples: list[tuple[str, str]] = []
+    @staticmethod
+    def _load_index(phonemes_csv: Path) -> list[tuple[str, str]]:
+        """
+        Parse the `<npz_name>|<phonemes>` manifest.
+        """
+
+        samples: list[tuple[str, str]] = []
         with open(phonemes_csv, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or "|" not in line:
                     continue
-
                 npz_name, phonemes = line.split("|", 1)
-                self._samples.append((npz_name.strip(), phonemes.strip()))
+                samples.append((npz_name.strip(), phonemes.strip()))
+
+        return samples
+
+    def _load_stats(
+        self, latent_stats: str | Path | None
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """
+        Corpus-wide (mean, std) for "dataset" mode, or None if unavailable.
+        """
+
+        if latent_stats is not None:
+            path = Path(latent_stats)
+        elif self._dirs["latent"] is not None:
+            path = self._dirs["latent"] / "latent_stats.npz"
+        else:
+            return None
+
+        if not path.is_file():
+            return None
+
+        stats = np.load(path)
+
+        return (
+            torch.from_numpy(stats["mean"].astype(np.float32)),      # (C,)
+            torch.from_numpy(stats["std"].astype(np.float32)),       # (C,)
+        )
 
     def __len__(self) -> int:
         return len(self._samples)
 
-    def _load_frames(self, directory: Path, npz_name: str) -> torch.Tensor:
-        """Load a ``(C, T)`` latent file as an unnormalized ``(T, C)`` tensor."""
-        arr = np.load(directory / npz_name)[self.LATENT_KEY]        # (C, T)
-        return torch.from_numpy(arr.T.copy()).float()               # (T, C)
+    # ---------
+    # Loading
+    # ---------
 
-    @staticmethod
-    def instance_stats(frames: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-channel mean/std of one utterance, over its own time axis.
-
-        Kept as a static method so inference can normalize with exactly the same
-        arithmetic the dataset used — the reference tensor is the distil, which
-        is the one thing available at both training and inference time.
+    def _load_frames(self, field: str, npz_name: str) -> torch.Tensor:
         """
-        return frames.mean(0), frames.std(0).clamp_min(1e-5)         # (C,), (C,)
+        A `(C, T)` latent file as an unnormalized `(T, C)` tensor.
+        """
+
+        arr = np.load(self._dirs[field] / npz_name)["latents"]       # (C, T)
+
+        return torch.from_numpy(arr.T.copy()).float()                # (T, C)
 
     def _load_codes(self, npz_name: str) -> torch.Tensor:
-        """Load a ``(num_layers, T)`` codec file as a ``(T, codec_layers)`` tensor."""
-        codes = np.load(self._codec_dir / npz_name)[self.CODEC_KEY]  # (num_layers, T)
+        """
+        A `(num_layers, T)` codec file as a `(T, codec_layers)` tensor.
+        """
+
+        codes = np.load(self._dirs["codec"] / npz_name)["codes"]     # (num_layers, T)
+        
         # Tolerate a leading singleton (batch) dim, as the latent path does.
         if codes.ndim == 3 and codes.shape[0] == 1:
             codes = codes[0]
@@ -178,9 +145,7 @@ class EchoDataset(Dataset):
                 f"but codec_layers={self._codec_layers} were requested"
             )
 
-        codes = codes[: self._codec_layers]                          # (codec_layers, T)
-
-        return torch.from_numpy(codes.T.copy()).long()               # (T, codec_layers)
+        return torch.from_numpy(codes[: self._codec_layers].T.copy()).long()
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         npz_name, phonemes = self._samples[idx]
@@ -188,31 +153,25 @@ class EchoDataset(Dataset):
         sample: dict[str, torch.Tensor] = {
             "text": torch.tensor(self._tokenizer.tokenize(phonemes), dtype=torch.long),
         }
+        for field in ("latent", "distil"):
+            if self._dirs[field] is not None:
+                sample[field] = self._load_frames(field, npz_name)
 
-        latent = self._load_frames(self._latent_dir, npz_name) if self._load_latent else None
-        distil = self._load_frames(self._distils_dir, npz_name) if self._load_distil else None
-
+        # Both streams share one set of statistics. In "instance" mode they come
+        # from the distil, so the same numbers are available at inference.
         if self._norm_mode == "instance":
-            # One set of stats for both streams, taken from the distil. Using
-            # each tensor's own stats would leave the target un-invertible:
-            # denormalizing a generated latent needs numbers that exist at
-            # inference, and only the distil's do.
-            reference = distil if distil is not None else latent
-            mean, std = self.instance_stats(reference)
+            reference = sample.get("distil", sample.get("latent"))
+            stats = (reference.mean(0), reference.std(0).clamp_min(1e-5))
         else:
-            mean, std = self._latent_mean, self._latent_std
+            stats = self._stats
 
-        if mean is not None:
-            if latent is not None:
-                latent = (latent - mean) / std
-            if distil is not None:
-                distil = (distil - mean) / std
+        if stats is not None:
+            mean, std = stats
+            for field in ("latent", "distil"):
+                if field in sample:
+                    sample[field] = (sample[field] - mean) / std
 
-        if latent is not None:
-            sample["latent"] = latent
-        if distil is not None:
-            sample["distil"] = distil
-        if self._load_codec:
+        if self._dirs["codec"] is not None:
             sample["codec"] = self._load_codes(npz_name)
 
         return sample
