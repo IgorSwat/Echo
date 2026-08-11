@@ -1,0 +1,127 @@
+{
+  "latent_dim": 24,
+  "init_std": 0.02,
+  "latent_norm": "dataset",
+  "vocab_size": {
+    "text": 256,
+    "prosody": 2052
+  },
+  "limits": {
+    "text_len": 256
+  },
+  "special_tokens": {
+    "text_pad": 0,
+    "prosody_pad": 2048,
+    "prosody_bos": 2049,
+    "prosody_eos": 2050,
+    "prosody_mask": 2051
+  },
+  "ar_model": {
+    "emb_dim": 256,
+    "hidden_dim": 512,
+    "text_encoder": {
+      "d_model": 256,
+      "num_layers": 6,
+      "num_heads": 8,
+      "ffn_dim": 1024,
+      "ffn_glu": false,
+      "kernel_size": 5,
+      "dropout": 0.1,
+      "use_rope": true,
+      "conv_use_norm": true
+    },
+    "decoder": {
+      "num_layers": 10,
+      "num_heads": 8,
+      "ffn_dim": 2048,
+      "ffn_glu": false,
+      "dropout": 0.1,
+      "use_rope": true,
+      "rope_norm": "absolute"
+    },
+    "head": {
+      "num_layers": 2,
+      "hidden_dim": 1024,
+      "dropout": 0.2,
+      "intra_frame_cond": true
+    },
+    "ctc": {
+      "enabled": true, 
+      "upsample": 2
+    }
+  },
+  "fm_model": {
+    "text_embedding_dim": 256,
+    "time_embedding_dim": 128,
+    "source_noise": 0.5,
+    "text_encoder": {
+      "num_layers": 6,
+      "num_heads": 8,
+      "ffn_dim": 1024,
+      "ffn_glu": false,
+      "kernel_size": 5,
+      "dropout": 0.1,
+      "use_rope": true,
+      "conv_use_norm": true
+    },
+    "blocks": [
+      {"type": "convnext",          "dim_in": 24, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 64, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 64, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
+      {"type": "hybrid_attention",  "d_model": 128, "d_kv": 256, "num_heads": 4, "ffn_dim": 512, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "convnext",          "dim_in": 128, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 128, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "hybrid_attention",  "d_model": 256, "d_kv": 256, "num_heads": 8, "ffn_dim": 1024, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "convnext",          "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 256, "dim_out": 512, "kernel_size": 7, "dropout": 0.1},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "use_ada_ln": true}
+    ]
+  },
+  "training": {
+    "ar": {
+      "data_dir": "data/ljspeech",
+      "output_dir": "checkpoints/ljspeech",
+      "batch_size": 16,
+      "num_epochs": 30,
+      "val_ratio": 0.05,
+      "learning_rate": 0.0005,
+      "weight_decay": 0.01,
+      "warmup_steps": 500,
+      "grad_clip": 1.0,
+      "num_workers": 4,
+      "log_every": 20,
+      "save_every": 2,
+      "early_stop": 5,
+      "seed": 42,
+      "ctc_weight": 0.2,
+      "history_mask_max": 0.15,
+      "history_mask_start_epoch": 3,
+      "history_mask_step": 0.03,
+      "history_mask_span_min": 2,
+      "history_mask_span_max": 5,
+      "history_mask_token_frac": 0.33
+    },
+    "fm": {
+      "data_dir": "data/ljspeech",
+      "output_dir": "checkpoints/ljspeech",
+      "batch_size": 16,
+      "num_epochs": 30,
+      "val_ratio": 0.05,
+      "learning_rate": 0.0003,
+      "weight_decay": 0.01,
+      "warmup_steps": 500,
+      "grad_clip": 1.0,
+      "num_workers": 4,
+      "log_every": 20,
+      "save_every": 2,
+      "early_stop": 5,
+      "seed": 42,
+      "text_dropout": 0.2
+    }
+  }
+}
