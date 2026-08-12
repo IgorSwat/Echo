@@ -66,6 +66,12 @@ class FMModelConfig:
     text_embedding_dim: int
     time_embedding_dim: int
 
+    # Width of the prosody token embedding. These are the AR stage's layer-0
+    # (Mimi semantic) tokens: embedded, stretched onto the latent's frame grid,
+    # and concatenated to the latent along the channel axis, so the stack's
+    # input is ``latent_dim + prosody_embedding_dim`` wide.
+    prosody_embedding_dim: int
+
     # Std of the Gaussian dither added to the transport's source:
     # ``x0 = distil + source_noise * eps``. Zero makes the pairing deterministic,
     # and against a deterministic pairing the L2-optimal velocity is the mean
@@ -94,6 +100,7 @@ class FMModelConfig:
         return cls(
             text_embedding_dim=d["text_embedding_dim"],
             time_embedding_dim=d["time_embedding_dim"],
+            prosody_embedding_dim=d["prosody_embedding_dim"],
             source_noise=float(d.get("source_noise", 0.0)),
             text_encoder_num_layers=te["num_layers"],
             text_encoder_num_heads=te["num_heads"],

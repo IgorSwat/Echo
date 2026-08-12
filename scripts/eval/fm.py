@@ -277,7 +277,14 @@ def main() -> None:
             row["anchor_ar_stage"] = score(ar_wav.reshape(-1).float().cpu().numpy(),
                                            MIMI_SR, True)
 
-            for src, raw, dtw in (("clean", clean_raw, False), ("ar", ar_raw, True)):
+            # The prosody stream has to come from the same place the conditioning
+            # does: the ground-truth tokens for the clean anchor, the AR model's
+            # own for the AR row. Mixing them would measure neither.
+            gt_prosody = gt_codes[:, 0].long()                       # (1, T_gt)
+            ar_prosody = ar_codes[..., 0].long()                     # (1, T_ar)
+
+            for src, raw, dtw, prosody in (("clean", clean_raw, False, gt_prosody),
+                                           ("ar", ar_raw, True, ar_prosody)):
                 cond, m, s = normalize(raw)
                 row[f"anchor_conditioning_{src}"] = score(
                     blue.decode(raw.transpose(1, 2)).reshape(-1).float().cpu().numpy(),
@@ -290,7 +297,7 @@ def main() -> None:
 
                 for spec in _CONFIGS:
                     gen = torch.Generator(device=device).manual_seed(args.seed)
-                    out = fm.sample(text_ids, cond, spec["steps"], spec["cfg"],
+                    out = fm.sample(text_ids, cond, prosody, spec["steps"], spec["cfg"],
                                     spec.get("solver", "euler"), generator=gen)
                     wav = blue.decode((out * s + m).transpose(1, 2)).reshape(-1)
                     wav = wav.float().cpu().numpy()

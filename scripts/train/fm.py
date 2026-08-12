@@ -35,18 +35,18 @@ def _flow_matching_loss(
     device: torch.device,
     text_dropout_p: float = 0.0,
 ) -> torch.Tensor:
-    """Interpolate between a dithered distil x0 and data x1; predict x1 - x0.
+    """Interpolate between Gaussian noise x0 and data x1; predict x1 - x0.
 
-    The distil is the starting state of the transport, not a side input: the
-    model is handed the AR stage's own latent and has to carry it to the data
-    distribution.
+    The transport now runs from noise, not from a distil. The distil used to be
+    the starting state -- the AR stage's own latent, carried to the data
+    distribution -- but with the prosody tokens concatenated to the latent the
+    two carried the same content twice, once clean and once through a lossy
+    2-codebook audio round trip. The tokens are the conditioning; the source is
+    noise, which is ordinary conditional flow matching.
 
-    ``config.fm_model.source_noise`` dithers that starting state, with fresh
-    noise every step. Without it the source is a deterministic function of the
-    target, and the L2-optimal velocity is then the mean of every rendering
-    consistent with that distil: measurably blurry output that gets worse the
-    longer the model trains. The dither is the seed that lets detail be *sampled*
-    instead of averaged.
+    ``config.fm_model.source_noise`` played no part here any more: it dithered a
+    deterministic distil pairing so the L2 optimum was not a blur over every
+    rendering consistent with it. A Gaussian source is already non-deterministic.
 
     With probability ``text_dropout_p`` (per sample) the text conditioning is
     replaced by the model's learned null-text condition, which is what enables
@@ -56,13 +56,15 @@ def _flow_matching_loss(
     """
     text = batch["text"].to(device)
     x1 = batch["latent"].to(device)
-    x0 = batch["distil"].to(device)
     text_mask = batch["text_key_padding_mask"].to(device)
     latent_mask = batch["latent_key_padding_mask"].to(device)
 
-    sigma = config.fm_model.source_noise
-    if sigma > 0.0:
-        x0 = x0 + sigma * torch.randn_like(x0)
+    # Layer 0 of the Mimi codec -- what the AR stage predicts. The dataset is
+    # asked for one layer, so the trailing axis is a singleton to squeeze.
+    prosody = batch["codec"][..., 0].to(device)                      # (B, K)
+    prosody_mask = batch["codec_key_padding_mask"].to(device)        # (B, K)
+
+    x0 = torch.randn_like(x1)                                        # (B, T, C)
 
     t = torch.rand(x1.shape[0], device=device)
     xt = (1.0 - t[:, None, None]) * x0 + t[:, None, None] * x1
@@ -72,7 +74,8 @@ def _flow_matching_loss(
     if text_dropout_p > 0.0:
         text_drop_mask = torch.rand(x1.shape[0], device=device) < text_dropout_p
 
-    pred = model(text, xt, t, text_mask, latent_mask, text_drop_mask)
+    pred = model(text, xt, prosody, t,
+                 text_mask, latent_mask, prosody_mask, text_drop_mask)
 
     mask = latent_mask.unsqueeze(-1).float()                         # (B, T, 1)
     sq_err = (pred - target).pow(2) * mask                           # (B, T, C)
@@ -100,9 +103,11 @@ def main() -> None:
     latent_dir = data_dir / "latents"
     latent_stats = latent_dir / "latent_stats.npz"
     dataset = EchoDataset(
-        data_dir / "phonemes.csv", latent_dir, data_dir / "distils", tokenizer,
+        data_dir / "phonemes.csv", latent_dir, None, tokenizer,
         latent_stats=latent_stats,
-        load_codec=False,                          # flow matching runs on latents only
+        load_distil=False,                         # the transport starts from noise
+        codec_dir=data_dir / "codecs",
+        codec_layers=1,                            # layer 0 only: the prosody stream
         norm_mode=config.latent_norm,
     )
     train_loader, val_loader, train_set, val_set = split_loaders(dataset, cfg)

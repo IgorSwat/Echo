@@ -26,7 +26,7 @@ from typing import Callable
 
 import torch
 
-from __common__ import select_device, sync_device
+from __common__ import BLUE_HOP, BLUE_SR, MIMI_FPS, select_device, sync_device
 from __style__ import (
     Colors,
     print_header,
@@ -112,9 +112,12 @@ def benchmark_fm(args: argparse.Namespace, device: torch.device) -> None:
             text = torch.randint(0, config.text_vocab_size, (B, t_text), device=device)
             latent = torch.randn(B, t_audio, config.latent_dim, device=device)
             time_tensor = torch.rand(B, device=device)
+            # The prosody grid runs at 12.5 Hz against the latent's 86.13 Hz.
+            t_prosody = max(1, round(t_audio * MIMI_FPS / (BLUE_SR / BLUE_HOP)))
+            prosody = torch.randint(0, EchoAR.CODEBOOK_SIZE, (B, t_prosody), device=device)
 
             secs[(t_audio, t_text)] = _time(
-                lambda: model(text, latent, time_tensor),
+                lambda: model(text, latent, prosody, time_tensor),
                 warmup=args.warmup, iters=args.iters, device=device,
             )
 

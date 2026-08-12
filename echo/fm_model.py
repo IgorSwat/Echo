@@ -18,7 +18,13 @@ import torch.nn as nn
 
 class EchoFM(nn.Module):
     """
-    EchoFM: text-, distil- and time-conditioned audio latent flow-matching backbone.
+    EchoFM: text-, prosody-, distil- and time-conditioned latent flow-matching backbone.
+
+    Prosody arrives as the AR stage's layer-0 (Mimi semantic) tokens on their own
+    12.5 Hz grid. They are frame-aligned with the audio, so they join the latent
+    by concatenation rather than cross-attention: stretching them onto the
+    latent's grid gives the stack a hard positional correspondence instead of an
+    alignment it would have to learn.
     """
 
     # Maps the "type" in a block spec to its module class.
@@ -42,10 +48,19 @@ class EchoFM(nn.Module):
 
         self.hidden_dim = cfg.text_embedding_dim
         self.cond_dim = cfg.time_embedding_dim
-        self.audio_in_dim = audio_in_dim if audio_in_dim is not None else config.latent_dim
+        self.prosody_dim = cfg.prosody_embedding_dim
+        # The prosody embedding rides alongside the latent on the channel axis,
+        # so the stack's first block is that much wider than the latent itself.
+        self.audio_in_dim = (
+            audio_in_dim if audio_in_dim is not None
+            else config.latent_dim + self.prosody_dim
+        )
 
         # --- Conditioning streams ---
         self.time_encoder = TimeEncoder(cfg.time_embedding_dim)
+        # Sized to the full prosody vocabulary, so pad/bos/eos/mask are embeddable
+        # even though only real codebook ids should reach a trained model.
+        self.prosody_embed = nn.Embedding(config.prosody_vocab_size, self.prosody_dim)
         self.text_encoder = TextEncoder(
             vocab_size=config.text_vocab_size,
             d_model=cfg.text_embedding_dim,
@@ -95,9 +110,21 @@ class EchoFM(nn.Module):
             if block_type in self.COND_TYPES:
                 spec.setdefault("use_ada_ln", True)
                 spec.setdefault("cond_dim", self.cond_dim)
-            # The running dimension wins, so a config only specifies dim_out.
-            if "dim_in" in spec:
-                spec["dim_in"] = cur_dim
+
+            # The config states every width, so it is checked rather than
+            # silently corrected: a spec that disagrees with what the previous
+            # block emits is a mistake to report, not one to paper over. The
+            # first block's input is the latent plus the prosody embedding.
+            width = spec.get("dim_in", spec.get("d_model"))
+            if width is not None and width != cur_dim:
+                first = " (latent + prosody embedding)" if not blocks else ""
+                key = "dim_in" if "dim_in" in spec else "d_model"
+                raise ValueError(
+                    f"block {len(blocks)} ({block_type}) declares {key} {width}, "
+                    f"but the stack is {cur_dim} wide at that point{first}. "
+                    f"Attention blocks do not reshape, so a width change has to "
+                    f"come from a convnext's dim_out."
+                )
 
             blocks.append(self.BLOCK_REGISTRY[block_type](**spec))
             cur_dim = self._infer_out_dim(block_type, spec)
@@ -114,8 +141,54 @@ class EchoFM(nn.Module):
 
     def _init_weights(self) -> None:
         # Submodules initialized themselves; this covers what EchoFM owns directly.
+        nn.init.normal_(self.prosody_embed.weight, mean=0.0, std=config.init_std)
         nn.init.normal_(self.out_proj.weight, mean=0.0, std=config.init_std)
         nn.init.zeros_(self.out_proj.bias)
+
+    # -------------------
+    # Prosody conditioning
+    # -------------------
+
+    def embed_prosody(
+        self,
+        prosody: torch.Tensor,                                      # (B, K) long
+        frames: int,                                                # T, the latent's length
+        prosody_key_padding_mask: Optional[torch.Tensor] = None,    # (B, K) or None
+        latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
+    ) -> torch.Tensor:
+        """Stretch the token grid onto the latent grid and embed it.
+
+        The two rates do not divide: Mimi runs at 12.5 Hz and the latents at
+        44100/512 = 86.13 Hz, and the realised ratio drifts per utterance with
+        the rounding at each end. So the mapping is built from each row's *own*
+        two lengths rather than a shared constant -- token
+        ``floor(t * K_b / T_b)`` for latent frame ``t`` -- which keeps a padded
+        batch aligned row by row. Nearest-neighbour is deliberate: the ConvNeXt
+        blocks that follow have a kernel of 7 and smooth the staircase anyway.
+        """
+
+        B, K = prosody.shape
+        device = prosody.device
+
+        if prosody_key_padding_mask is not None:
+            k = prosody_key_padding_mask.sum(1)                     # (B,)
+        else:
+            k = torch.full((B,), K, dtype=torch.long, device=device)
+        if latent_key_padding_mask is not None:
+            t_len = latent_key_padding_mask.sum(1)                  # (B,)
+        else:
+            t_len = torch.full((B,), frames, dtype=torch.long, device=device)
+
+        k = k.clamp(min=1)
+        t_len = t_len.clamp(min=1)
+
+        pos = torch.arange(frames, device=device)[None, :]          # (1, T)
+        idx = (pos * k[:, None]) // t_len[:, None]                  # (B, T)
+        # Past a row's own end the index runs off; it is clamped to that row's
+        # last real token and the position is masked out downstream regardless.
+        idx = torch.minimum(idx, (k - 1)[:, None]).clamp(min=0)
+
+        return self.prosody_embed(prosody.gather(1, idx))           # (B, T, prosody_dim)
 
     # --------------
     # Forward pass
@@ -125,9 +198,11 @@ class EchoFM(nn.Module):
         self,
         text: torch.Tensor,                                         # (B, S) long
         latent: torch.Tensor,                                       # (B, T, latent_dim)
+        prosody: torch.Tensor,                                      # (B, K) long
         time: torch.Tensor,                                         # (B,)
         text_key_padding_mask: Optional[torch.Tensor] = None,       # (B, S) or None
         latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
+        prosody_key_padding_mask: Optional[torch.Tensor] = None,    # (B, K) or None
         text_drop_mask: Optional[torch.Tensor] = None,              # (B,) bool or None
     ) -> torch.Tensor:
         cond = self.time_encoder(time)                              # (B, cond_dim)
@@ -138,7 +213,12 @@ class EchoFM(nn.Module):
             null = self.null_text.expand_as(text_enc)               # (B, S, hidden)
             text_enc = torch.where(text_drop_mask.view(-1, 1, 1), null, text_enc)
 
-        x = latent                                                  # (B, T, latent_dim)
+        # The prosody stream is frame-aligned, so it joins on the channel axis
+        # and travels through the stack as part of the latent.
+        prosody_enc = self.embed_prosody(
+            prosody, latent.shape[1], prosody_key_padding_mask, latent_key_padding_mask,
+        )                                                           # (B, T, prosody_dim)
+        x = torch.cat([latent, prosody_enc], dim=-1)                # (B, T, audio_in_dim)
         mask = latent_key_padding_mask
 
         for block in self.blocks:
@@ -165,6 +245,7 @@ class EchoFM(nn.Module):
         self,
         text: torch.Tensor,                                         # (1, S) long
         x: torch.Tensor,                                            # (1, T, latent_dim)
+        prosody: torch.Tensor,                                      # (1, K) long
         t: torch.Tensor,                                            # (1,)
         cfg_scale: float,
     ) -> torch.Tensor:
@@ -172,14 +253,17 @@ class EchoFM(nn.Module):
         One velocity evaluation at (x, t), with classifier-free guidance.
 
         NOTE: with cfg_scale != 1 the model runs batch-doubled (conditioned +
-        null-text) and extrapolates v_uncond + cfg * (v_cond - v_uncond).
+        null-text) and extrapolates v_uncond + cfg * (v_cond - v_uncond). Only
+        the text is dropped -- the prosody stream carries the content and rides
+        along unchanged in both halves.
         """
 
         if cfg_scale == 1.0:
-            return self(text, x, t)
+            return self(text, x, prosody, t)
 
         drop = torch.tensor([False, True], device=x.device)
-        v2 = self(text.repeat(2, 1), x.repeat(2, 1, 1), t.repeat(2), None, None, drop)
+        v2 = self(text.repeat(2, 1), x.repeat(2, 1, 1), prosody.repeat(2, 1),
+                  t.repeat(2), None, None, None, drop)
 
         return v2[1:2] + cfg_scale * (v2[0:1] - v2[1:2])            # (1, T, latent_dim)
 
@@ -188,6 +272,7 @@ class EchoFM(nn.Module):
         self,
         text: torch.Tensor,                                         # (1, S) long
         x0: torch.Tensor,                                           # (1, T, latent_dim) distil
+        prosody: torch.Tensor,                                      # (1, K) long
         steps: int,
         cfg_scale: float = 1.0,
         solver: str = "euler",
@@ -211,10 +296,10 @@ class EchoFM(nn.Module):
         for i in range(steps):
             t0 = torch.full((1,), i / steps, device=text.device)
             if solver == "euler":
-                x = x + dt * self._velocity(text, x, t0, cfg_scale)
+                x = x + dt * self._velocity(text, x, prosody, t0, cfg_scale)
             else:                                                   # midpoint (RK2)
-                x_mid = x + 0.5 * dt * self._velocity(text, x, t0, cfg_scale)
+                x_mid = x + 0.5 * dt * self._velocity(text, x, prosody, t0, cfg_scale)
                 t_mid = torch.full((1,), (i + 0.5) / steps, device=text.device)
-                x = x + dt * self._velocity(text, x_mid, t_mid, cfg_scale)
+                x = x + dt * self._velocity(text, x_mid, prosody, t_mid, cfg_scale)
 
         return x                                                    # (1, T, latent_dim)

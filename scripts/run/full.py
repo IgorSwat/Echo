@@ -263,9 +263,11 @@ def main() -> None:
     generator = None
     if args.seed is not None:
         generator = torch.Generator(device=device).manual_seed(args.seed)
+    # Layer 0 of what stage 1 just produced: the prosody stream EchoFM renders.
+    prosody = codes[..., 0]                                          # (1, T_ar)
     with _timed("fm", device, timings):
-        latent = fm_model.sample(text_ids, distil, args.steps, args.cfg, args.solver,
-                                 generator=generator)
+        latent = fm_model.sample(text_ids, distil, prosody, args.steps, args.cfg,
+                                 args.solver, generator=generator)
     if stats is not None:
         mean, std = stats
         latent = latent * std + mean

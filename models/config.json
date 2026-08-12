@@ -31,7 +31,7 @@
       "conv_use_norm": true
     },
     "decoder": {
-      "num_layers": 10,
+      "num_layers": 8,
       "num_heads": 8,
       "ffn_dim": 2048,
       "ffn_glu": false,
@@ -53,6 +53,7 @@
   "fm_model": {
     "text_embedding_dim": 256,
     "time_embedding_dim": 128,
+    "prosody_embedding_dim": 128,
     "source_noise": 0.5,
     "text_encoder": {
       "num_layers": 6,
@@ -65,13 +66,13 @@
       "conv_use_norm": true
     },
     "blocks": [
-      {"type": "convnext",          "dim_in": 24, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 64, "dim_out": 64, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 64, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
-      {"type": "hybrid_attention",  "d_model": 128, "d_kv": 256, "num_heads": 4, "ffn_dim": 512, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
-      {"type": "convnext",          "dim_in": 128, "dim_out": 128, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 128, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 152, "dim_out": 152, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 152, "dim_out": 192, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 192, "dim_out": 192, "kernel_size": 7, "dropout": 0.1},
+      {"type": "hybrid_attention",  "d_model": 192, "d_kv": 256, "num_heads": 4, "ffn_dim": 768, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
+      {"type": "convnext",          "dim_in": 192, "dim_out": 224, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 224, "dim_out": 224, "kernel_size": 7, "dropout": 0.1},
+      {"type": "convnext",          "dim_in": 224, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
       {"type": "hybrid_attention",  "d_model": 256, "d_kv": 256, "num_heads": 8, "ffn_dim": 1024, "dropout": 0.1, "use_rope": true, "use_ada_ln": true},
       {"type": "convnext",          "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
       {"type": "convnext",          "dim_in": 256, "dim_out": 512, "kernel_size": 7, "dropout": 0.1},
