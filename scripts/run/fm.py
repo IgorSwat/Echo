@@ -95,7 +95,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, required=True,
                         help="Path to a training checkpoint (.pt).")
     parser.add_argument("--text", type=str, default=None,
-                        help="Raw text to synthesize (phonemized with eSpeak).")
+                        help="Raw text to synthesize (phonemized with misaki, the corpus G2P).")
     parser.add_argument("--distil", type=str, default=None,
                         help="Path to a .npz file with the starting distil latent (C, T).")
     parser.add_argument("--test-suite", type=str, default=None,

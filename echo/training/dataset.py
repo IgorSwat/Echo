@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from echo import config
 from echo.tokenizer import Tokenizer
 
 
@@ -39,6 +40,7 @@ class EchoDataset(Dataset):
         min_ref_frames: int = 50,                    # 4.0 s at 12.5 Hz
         max_ref_frames: int | None = None,
         reference_seed: int | None = None,
+        max_text_tokens: int | None = config.text_len_limit,
     ) -> None:
         if norm_mode not in self.NORM_MODES:
             raise ValueError(f"norm_mode must be one of {self.NORM_MODES}, got {norm_mode!r}")
@@ -73,6 +75,22 @@ class EchoDataset(Dataset):
 
         self._stats = self._load_stats(latent_stats)
         self._samples = self._load_index(Path(phonemes_csv))
+
+        # Both models size their rotary tables from `text_len_limit`, and the AR
+        # model's paired mode has to fit two transcripts plus a separator inside
+        # twice it, so a transcript over the limit is not merely long -- it
+        # cannot be encoded at all. Dropping those utterances here keeps the
+        # failure out of the training loop, where it arrives thousands of steps
+        # in as a shape error. `dropped_long_text` is the count, for the caller
+        # to report rather than lose silently.
+        self.dropped_long_text = 0
+        if max_text_tokens is not None:
+            kept = [
+                s for s in self._samples
+                if len(tokenizer.tokenize(s[1])) <= max_text_tokens
+            ]
+            self.dropped_long_text = len(self._samples) - len(kept)
+            self._samples = kept
 
         # speaker -> indices of its utterances that may serve as a reference.
         self._by_speaker: dict[str, np.ndarray] | None = None

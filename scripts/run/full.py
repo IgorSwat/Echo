@@ -96,7 +96,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fm-model", type=str, required=True,
                         help="Path to an EchoFM checkpoint (.pt).")
     parser.add_argument("--text", type=str, required=True,
-                        help="Raw text to synthesize (phonemized with eSpeak).")
+                        help="Raw text to synthesize (phonemized with misaki, the corpus G2P).")
     parser.add_argument("--max-frames", type=int, default=1000,
                         help="Hard cap on AR frames (default: 1000, i.e. 80s).")
     parser.add_argument("--temperature", type=float, default=0.0, metavar="T",

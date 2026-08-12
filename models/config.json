@@ -7,7 +7,7 @@
     "prosody": 2052
   },
   "limits": {
-    "text_len": 256
+    "text_len": 512
   },
   "special_tokens": {
     "text_pad": 0,

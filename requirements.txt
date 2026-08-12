@@ -19,6 +19,7 @@ cycler==0.12.1
 debugpy==1.8.21
 decorator==5.3.1
 dlinfo==2.0.0
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 espeakng-loader==0.2.4
 executing==2.2.1
 filelock==3.29.4
@@ -62,6 +63,7 @@ narwhals==2.22.1
 nest-asyncio2==1.7.2
 networkx==3.6.1
 nltk==3.9.4
+num2words==0.5.14
 numba==0.65.1
 numpy==2.4.6
 packaging==26.2
@@ -99,6 +101,7 @@ shellingham==1.5.4
 six==1.17.0
 soundfile==0.14.0
 soxr==1.1.0
+spacy==3.8.15
 stack-data==0.6.3
 sympy==1.14.0
 tensorboard==2.21.0

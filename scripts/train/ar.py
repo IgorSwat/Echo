@@ -360,6 +360,13 @@ def main() -> None:
     print_info("Manifest", manifest.name, Colors.OKCYAN if manifest.name != "phonemes.csv"
                else Colors.WARNING)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
+    if dataset.dropped_long_text:
+        total = len(dataset) + dataset.dropped_long_text
+        print_info("Dropped utterances",
+                   f"{dataset.dropped_long_text} ({dataset.dropped_long_text / total:.2%}) "
+                   f"over the {config.text_len_limit}-token text limit; a pair of them "
+                   f"would not fit the encoder's {2 * config.text_len_limit + 1} positions",
+                   Colors.WARNING)
     print_info("Reference conditioning",
                f"same-speaker, whole utterances >= {MIN_REF_FRAMES} frames "
                f"({MIN_REF_FRAMES / 12.5:.1f}s) over "
