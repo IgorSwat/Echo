@@ -68,7 +68,7 @@ _CONFIGS = [
     {"name": "s8_mid",  "steps": 8,  "cfg": 1.0, "solver": "midpoint"},
 ]
 
-_ANCHORS = ("real", "codec_roundtrip", "ar_stage", "conditioning_clean", "conditioning_ar")
+_ANCHORS = ("real", "codec_roundtrip", "ar_stage", "mimi_roundtrip_clean", "mimi_roundtrip_ar")
 
 
 # ---------
@@ -143,7 +143,7 @@ def _parse_args() -> argparse.Namespace:
                         help="Short name for this result (default: the checkpoint stem).")
     parser.add_argument("--seed", type=int, default=0,
                         help="Seeds the source dither, so a run is reproducible (the transport "
-                             "is stochastic whenever fm_model.source_noise > 0).")
+                             "is stochastic: the transport starts from noise).")
     parser.add_argument("--num-files", type=int, default=12,
                         help="Val-split utterances to score (default: 12).")
     parser.add_argument("--norm", choices=("dataset", "instance"), default=None,
@@ -189,8 +189,7 @@ def main() -> None:
     print_info("Checkpoint", args.model, Colors.OKCYAN)
     print_info("Tag", tag)
     print_info("Device", str(device))
-    print_info("Source noise", f"sigma {config.fm_model.source_noise:g}"
-               + ("" if config.fm_model.source_noise > 0 else "  (deterministic transport)"))
+    print_info("Source", "Gaussian noise")
     print_info("Normalization", f"{norm}"
                + ("" if args.norm else "  (from config; pass --norm if the checkpoint differs)"),
                Colors.OKCYAN if args.norm else Colors.WARNING)
@@ -219,15 +218,15 @@ def main() -> None:
     print_info("Trained", f"epoch {ckpt.get('epoch', '?')}, "
                           f"val_loss {ckpt.get('val_loss', float('nan')):.4f}")
 
-    def normalize(raw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """(normalized, mean, std) — instance mode takes its numbers from the distil."""
-        if norm == "instance":
-            m = raw.mean(dim=-2, keepdim=True)
-            s = raw.std(dim=-2, keepdim=True).clamp_min(1e-5)
-        else:
-            m, s = d_mean, d_std
+    if norm == "instance":
+        raise SystemExit(
+            "latent_norm='instance' took its statistics from the distil, which the "
+            "transport no longer uses. Use 'dataset' (models/config.json or --norm)."
+        )
 
-        return (raw - m) / s, m, s
+    def normalize(raw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(normalized, mean, std) against the corpus statistics."""
+        return (raw - d_mean) / d_std, d_mean, d_std
 
     # --- Score --------------------------------------------------------------
     per_file: list[dict] = []
@@ -285,19 +284,24 @@ def main() -> None:
 
             for src, raw, dtw, prosody in (("clean", clean_raw, False, gt_prosody),
                                            ("ar", ar_raw, True, ar_prosody)):
-                cond, m, s = normalize(raw)
-                row[f"anchor_conditioning_{src}"] = score(
+                # The tokens no longer seed the transport, so this is not a
+                # conditioning anchor any more -- it is the ceiling those two
+                # codebooks carry once Mimi decodes them.
+                _, m, s = normalize(raw)
+                row[f"anchor_mimi_roundtrip_{src}"] = score(
                     blue.decode(raw.transpose(1, 2)).reshape(-1).float().cpu().numpy(),
                     BLUE_SR, dtw)
 
+                # The token count fixes the generated length now.
+                n_lat = fm.latent_frames(prosody.shape[1])
                 if src == "clean":              # aligned: latent metrics are meaningful
                     tgt = (target_raw.transpose(1, 2) - m) / s
-                    T = min(tgt.shape[1], cond.shape[1])
+                    T = min(tgt.shape[1], n_lat)
                     target_pool.append(_feats(tgt[0, :T].cpu().numpy()))
 
                 for spec in _CONFIGS:
                     gen = torch.Generator(device=device).manual_seed(args.seed)
-                    out = fm.sample(text_ids, cond, prosody, spec["steps"], spec["cfg"],
+                    out = fm.sample(text_ids, prosody, spec["steps"], spec["cfg"],
                                     spec.get("solver", "euler"), generator=gen)
                     wav = blue.decode((out * s + m).transpose(1, 2)).reshape(-1)
                     wav = wav.float().cpu().numpy()
@@ -355,7 +359,6 @@ def main() -> None:
         "ar_checkpoint": args.ar_model,
         "epoch": ckpt.get("epoch"), "val_loss": ckpt.get("val_loss"),
         "normalization": norm,
-        "source_noise": config.fm_model.source_noise,
         "seed": args.seed,
         "num_files": len(files), "files": [r["stem"] for r in per_file],
         "sampler_configs": _CONFIGS,

@@ -72,14 +72,6 @@ class FMModelConfig:
     # input is ``latent_dim + prosody_embedding_dim`` wide.
     prosody_embedding_dim: int
 
-    # Std of the Gaussian dither added to the transport's source:
-    # ``x0 = distil + source_noise * eps``. Zero makes the pairing deterministic,
-    # and against a deterministic pairing the L2-optimal velocity is the mean
-    # over every target consistent with that distil — which is audible as blur.
-    # The dither gives the model a seed, so detail is sampled rather than
-    # averaged. Inference must use the same value.
-    source_noise: float
-
     # Text encoder (Conformer)
     text_encoder_num_layers: int
     text_encoder_num_heads: int
@@ -101,7 +93,6 @@ class FMModelConfig:
             text_embedding_dim=d["text_embedding_dim"],
             time_embedding_dim=d["time_embedding_dim"],
             prosody_embedding_dim=d["prosody_embedding_dim"],
-            source_noise=float(d.get("source_noise", 0.0)),
             text_encoder_num_layers=te["num_layers"],
             text_encoder_num_heads=te["num_heads"],
             text_encoder_ffn_dim=te["ffn_dim"],

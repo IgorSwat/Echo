@@ -54,7 +54,6 @@
     "text_embedding_dim": 256,
     "time_embedding_dim": 128,
     "prosody_embedding_dim": 128,
-    "source_noise": 0.5,
     "text_encoder": {
       "num_layers": 6,
       "num_heads": 8,

@@ -41,6 +41,13 @@ class EchoFM(nn.Module):
     # ODE integrators available to :meth:`sample`.
     SOLVERS = ("euler", "midpoint")
 
+    # Latent frames per prosody token: BlueCodec's 44100/512 = 86.13 Hz grid
+    # against Mimi's 12.5 Hz one. The two do not divide, which is why the
+    # stretch in :meth:`embed_prosody` is built per row from the real lengths;
+    # this constant is only used to *choose* a length when generating, where
+    # there is no target to measure.
+    LATENT_FRAMES_PER_TOKEN = (44100 / 512) / 12.5                  # 6.890625
+
     def __init__(self, audio_in_dim: Optional[int] = None) -> None:
         super().__init__()
 
@@ -267,30 +274,48 @@ class EchoFM(nn.Module):
 
         return v2[1:2] + cfg_scale * (v2[0:1] - v2[1:2])            # (1, T, latent_dim)
 
+    def latent_frames(self, tokens: int) -> int:
+        """
+        How many latent frames a run of ``tokens`` prosody tokens covers.
+
+        Only inference needs this: in training the length comes from the target.
+        The realised ratio drifts a little per utterance with the rounding at
+        each codec's end -- measured 6.67 to 6.93 against the nominal 6.89 -- so
+        this is the best available estimate, not an exact count.
+        """
+
+        return max(1, round(tokens * self.LATENT_FRAMES_PER_TOKEN))
+
     @torch.no_grad()
     def sample(
         self,
         text: torch.Tensor,                                         # (1, S) long
-        x0: torch.Tensor,                                           # (1, T, latent_dim) distil
         prosody: torch.Tensor,                                      # (1, K) long
         steps: int,
         cfg_scale: float = 1.0,
         solver: str = "euler",
         generator: Optional[torch.Generator] = None,
-        dither: bool = True,
+        frames: Optional[int] = None,                               # default: from `prosody`
     ) -> torch.Tensor:
-        """
-        Integrate the velocity field from t=0 (the source) to t=1 (data).
+        """Integrate the velocity field from t=0 (noise) to t=1 (data).
+
+        The transport starts from Gaussian noise, always. Nothing else seeds it:
+        the prosody tokens are conditioning, read at every step alongside the
+        text, and never the state being carried. ``frames`` overrides the length
+        the token count implies.
 
         NOTE: euler costs one model evaluation per step, midpoint (RK2) two.
         """
         if solver not in self.SOLVERS:
             raise ValueError(f"solver must be one of {self.SOLVERS}, got {solver!r}")
+        if steps < 1:
+            raise ValueError(f"steps must be >= 1, got {steps}")
 
         dt = 1.0 / steps
-        sigma = config.fm_model.source_noise if dither else 0.0
-        x = x0 if sigma <= 0.0 else x0 + sigma * torch.randn(
-            x0.shape, device=x0.device, dtype=x0.dtype, generator=generator
+        T = self.latent_frames(prosody.shape[1]) if frames is None else frames
+        x = torch.randn(
+            (prosody.shape[0], T, config.latent_dim),
+            device=prosody.device, dtype=torch.float32, generator=generator,
         )
 
         for i in range(steps):

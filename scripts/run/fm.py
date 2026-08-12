@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Generate audio with a trained Echo flow-matching model.
 
-Integrates `dx/dt = v(x, t)` from the dithered distil latent at t=0 up to t=1 —
-the transport the model was trained on — and decodes the result with BlueCodec.
+Integrates `dx/dt = v(x, t)` from Gaussian noise at t=0 up to t=1 and decodes the
+result with BlueCodec. Nothing seeds the transport: the layer-0 prosody tokens
+are conditioning the model reads at every step, and they also set the output
+length, since the latent grid runs at a fixed multiple of the token grid.
 
 Usage:
     python scripts/run/fm.py --model checkpoints/echo_final.pt --text "hello world" \\
-        --distil data/distils/clone_0000.npz --steps 8 --cfg 3.0 --output out.wav
+        --codec data/codecs/clone_0000.npz --steps 8 --cfg 3.0 --output out.wav
 
     python scripts/run/fm.py --model checkpoints/echo_final.pt \\
         --test-suite data/norbi/phonemes_test.csv --steps 8 --cfg 3.0
@@ -36,7 +38,6 @@ from __common__ import (
     load_latent_stats,
     load_pairs_csv,
     load_tokenizer,
-    norm_stats,
     select_device,
 )
 from __phonemize__ import add_phonemize_args, phonemize_args
@@ -44,25 +45,6 @@ from __style__ import Colors, print_header, print_info, print_section, print_sep
 
 from echo import config
 from echo.fm_model import EchoFM
-
-
-def _load_distil(
-    path: Path, device: torch.device, stats: Stats | None
-) -> tuple[torch.Tensor, float, Stats | None]:
-    """
-    A normalized distil latent, its duration, and the stats that normalized it.
-    """
-
-    arr = np.load(path)["latents"]                                   # (C, T)
-    distil = torch.from_numpy(arr.T.copy()).float().to(device)       # (T, C)
-    duration = distil.shape[0] * BLUE_HOP / BLUE_SR
-
-    used = norm_stats(distil, stats)
-    if used is not None:
-        mean, std = used
-        distil = (distil - mean) / std
-
-    return distil, duration, used
 
 
 def _load_prosody(path: Path, device: torch.device) -> torch.Tensor:
@@ -82,16 +64,14 @@ def _generate(
     model: EchoFM,
     codec: BlueCodec,
     text_ids: torch.Tensor,
-    distil: torch.Tensor,
     prosody: torch.Tensor,
     duration: float,
-    stats: Stats | None,                          # the ones that normalized `distil`
+    stats: Stats | None,
     args: argparse.Namespace,
     output_path: Path,
 ) -> None:
-    """Integrate, denormalize, decode, and write the waveform."""
-    latent = model.sample(text_ids, distil.unsqueeze(0), prosody,
-                          args.steps, args.cfg, args.solver)
+    """Integrate from noise, denormalize, decode, and write the waveform."""
+    latent = model.sample(text_ids, prosody, args.steps, args.cfg, args.solver)
     if stats is not None:
         mean, std = stats
         latent = latent * std + mean
@@ -110,8 +90,6 @@ def _parse_args() -> argparse.Namespace:
                         help="Path to a training checkpoint (.pt).")
     parser.add_argument("--text", type=str, default=None,
                         help="Raw text to synthesize (phonemized with eSpeak).")
-    parser.add_argument("--distil", type=str, default=None,
-                        help="Path to a .npz file with the starting distil latent (C, T).")
     parser.add_argument("--codec", type=str, default=None,
                         help="Path to the matching codec .npz; its layer 0 is the prosody "
                              "conditioning. In --test-suite mode these are read from "
@@ -133,10 +111,8 @@ def _parse_args() -> argparse.Namespace:
     add_phonemize_args(parser)
     args = parser.parse_args()
 
-    if args.test_suite is None and (args.text is None or args.distil is None
-                                    or args.codec is None):
-        parser.error("--text, --distil and --codec are required when --test-suite "
-                     "is not provided")
+    if args.test_suite is None and (args.text is None or args.codec is None):
+        parser.error("--text and --codec are required when --test-suite is not provided")
 
     return args
 
@@ -155,20 +131,19 @@ def main() -> None:
     tokenizer = load_tokenizer()
     codec = BlueCodec.from_pretrained("notmax123/blue-codec", device=str(device))
 
-    # Both modes reduce to a list of (distil, codec, phonemes, output path). The
-    # distil and the codec share a basename: they describe the same utterance.
+    # Both modes reduce to a list of (codec, phonemes, output path).
     if args.test_suite is not None:
         suite = Path(args.test_suite)
         jobs = [
-            (suite.parent / "distils" / name, suite.parent / "codecs" / name, phonemes,
+            (suite.parent / "codecs" / name, phonemes,
              suite.parent / "test_outputs" / f"{Path(name).stem}.wav")
             for name, phonemes in load_pairs_csv(suite)
         ]
         title, source = "Echo - Test Suite", f"{suite} ({len(jobs)} entries)"
     else:
         phonemes = phonemize_args(args.text, args)
-        jobs = [(Path(args.distil), Path(args.codec), phonemes, Path(args.output))]
-        title, source = "Echo - Generation", str(args.distil)
+        jobs = [(Path(args.codec), phonemes, Path(args.output))]
+        title, source = "Echo - Generation", str(args.codec)
 
     print_header(title)
     print_separator()
@@ -180,30 +155,33 @@ def main() -> None:
     if args.test_suite is None:
         print_info("Language", args.language)
         if args.print_phonemes:
-            print_info("Phonemes", jobs[0][2], Colors.OKCYAN)
+            print_info("Phonemes", jobs[0][1], Colors.OKCYAN)
     if config.latent_norm == "instance":
-        print_info("Latent norm", "per instance (from each distil's own channel stats)",
-                   Colors.OKCYAN)
-    elif stats is not None:
+        raise SystemExit(
+            "latent_norm='instance' took its statistics from the distil, and the "
+            "transport no longer has one. Set latent_norm to 'dataset' in "
+            "models/config.json and train against latent_stats.npz."
+        )
+    if stats is not None:
         print_info("Latent norm", f"per dataset ({stats_path})", Colors.OKCYAN)
     else:
         print_info("Latent norm", f"disabled (stats not found: {stats_path})", Colors.WARNING)
 
     print_section("Generating")
-    for i, (distil_path, codec_path, phonemes, output_path) in enumerate(jobs, start=1):
-        distil, duration, used = _load_distil(distil_path, device, stats)
+    for i, (codec_path, phonemes, output_path) in enumerate(jobs, start=1):
         prosody = _load_prosody(codec_path, device)
+        # The token count sets the length, so it also sets the duration.
+        duration = model.latent_frames(prosody.shape[1]) * BLUE_HOP / BLUE_SR
         text_ids = torch.tensor(
             [tokenizer.tokenize(phonemes)], dtype=torch.long, device=device
         )
-        _generate(model, codec, text_ids, distil, prosody, duration, used,
-                  args, output_path)
+        _generate(model, codec, text_ids, prosody, duration, stats, args, output_path)
         print_info(f"[{i}/{len(jobs)}]",
-                   f"{distil_path.name} -> {output_path.name}  ({duration:.2f}s)",
+                   f"{codec_path.name} -> {output_path.name}  ({duration:.2f}s)",
                    Colors.OKGREEN)
 
     print_separator()
-    print_info("Saved", str(jobs[0][3]) if len(jobs) == 1 else f"{len(jobs)} files",
+    print_info("Saved", str(jobs[0][2]) if len(jobs) == 1 else f"{len(jobs)} files",
                Colors.OKGREEN)
 
 

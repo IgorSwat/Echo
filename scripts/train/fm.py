@@ -44,9 +44,6 @@ def _flow_matching_loss(
     2-codebook audio round trip. The tokens are the conditioning; the source is
     noise, which is ordinary conditional flow matching.
 
-    ``config.fm_model.source_noise`` played no part here any more: it dithered a
-    deterministic distil pairing so the L2 optimum was not a blur over every
-    rendering consistent with it. A Gaussian source is already non-deterministic.
 
     With probability ``text_dropout_p`` (per sample) the text conditioning is
     replaced by the model's learned null-text condition, which is what enables
@@ -120,11 +117,6 @@ def main() -> None:
     print_section("Setup")
     print_info("Device", str(device), Colors.OKCYAN)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
-    print_info("Source noise",
-               f"sigma {config.fm_model.source_noise:g}  (x0 = distil + sigma * eps)"
-               if config.fm_model.source_noise > 0 else
-               "0 — deterministic pairing; the L2 optimum is the conditional mean (blur)",
-               Colors.OKCYAN if config.fm_model.source_noise > 0 else Colors.WARNING)
     if config.latent_norm == "instance":
         print_info("Latent normalization",
                    "per instance (each utterance by its own distil's channel stats; "

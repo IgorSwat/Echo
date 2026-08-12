@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Full Echo pipeline: text -> prosody tokens -> audio.
 
-    text -> EchoAR -> Mimi.decode -> resample -> BlueCodec.encode
-         -> EchoFM (ODE) -> BlueCodec.decode -> audio
+    text -> EchoAR -> layer-0 tokens -> EchoFM (ODE from noise) -> BlueCodec.decode
 
-EchoFM sees exactly the `distil -> data` transport it was trained on, only with
-the distil side synthesised rather than read from disk. The AR stage decides the
-duration by emitting EOS, so no length needs to be supplied.
+EchoFM starts from Gaussian noise and reads the AR stage's layer-0 tokens as
+conditioning, which is the transport it was trained on. The AR stage decides the
+duration by emitting EOS, and the token count then fixes the latent length, so
+nothing needs to be supplied.
 
 Usage:
     python scripts/run/full.py --ar-model checkpoints/echo_ar_best.pt \\
@@ -46,7 +46,6 @@ from __common__ import (
     load_checkpoint,
     load_latent_stats,
     load_tokenizer,
-    norm_stats,
     select_device,
     sync_device,
 )
@@ -112,9 +111,8 @@ def _parse_args() -> argparse.Namespace:
                         help="ODE integrator: 'euler' (1 model eval/step, default) or "
                              "'midpoint' (RK2, 2 evals/step, better at few steps).")
     parser.add_argument("--seed", type=int, default=None, metavar="N",
-                        help="Seed the flow-matching source dither, making a rendering "
-                             "reproducible. Omitted, each run differs (fm_model.source_noise "
-                             "is what makes the transport stochastic).")
+                        help="Seed the noise the transport starts from, making a rendering "
+                             "reproducible. Omitted, each run differs.")
     parser.add_argument("--cfg", type=float, default=3.0,
                         help="Classifier-free guidance scale (default: 3.0; 1.0 disables it).")
     parser.add_argument("--stats", type=str, default=None,
@@ -202,14 +200,17 @@ def main() -> None:
     print_info("Steps", str(args.steps))
     print_info("Solver", args.solver)
     print_info("CFG scale", str(args.cfg))
-    print_info("Source noise", f"sigma {config.fm_model.source_noise:g}"
-               + (f", seed {args.seed}" if args.seed is not None else ", unseeded (varies per run)")
-               if config.fm_model.source_noise > 0 else "0 (deterministic)")
+    print_info("Source", "Gaussian noise"
+               + (f", seed {args.seed}" if args.seed is not None
+                  else ", unseeded (varies per run)"))
     print_info("Low-pass", f"{args.lowpass:g} Hz" if args.lowpass > 0 else "off")
     if config.latent_norm == "instance":
-        print_info("Latent norm", "per instance (from the AR stage's own distil stats)",
-                   Colors.OKCYAN)
-    elif stats is not None:
+        raise SystemExit(
+            "latent_norm='instance' took its statistics from the distil, and the "
+            "pipeline no longer builds one. Set latent_norm to 'dataset' in "
+            "models/config.json and train against latent_stats.npz."
+        )
+    if stats is not None:
         print_info("Latent norm", f"per dataset ({stats_path})", Colors.OKCYAN)
     else:
         print_info("Latent norm", f"disabled (stats not found: {stats_path})", Colors.WARNING)
@@ -233,44 +234,32 @@ def main() -> None:
     print_info("Duration", f"{duration:.2f}s")
     print_info("Time", f"{timings['ar']:.3f}s  ({1000 * timings['ar'] / frames:.1f} ms/frame)")
 
-    # --- Stage 2: tokens -> distil latent -----------------------------------
-    print_section("Stage 2 — Mimi decode -> BlueCodec encode")
-    with _timed("codec", device, timings):
-        with torch.no_grad():
-            audio_mimi = decode_mimi(mimi, codes.transpose(1, 2))    # (1, T_audio) @ 24 kHz
-            audio_blue = torchaudio.functional.resample(audio_mimi, MIMI_SR, BLUE_SR)
-            distil = blue.encode(audio_blue)                         # (1, C, T_lat)
-
-    distil = distil.transpose(1, 2).float()                          # (1, T_lat, C)
-    # Under instance normalization the numbers come from this very distil, so the
-    # same ones invert the model's output further down.
-    stats = norm_stats(distil, stats)
-    if stats is not None:
-        mean, std = stats
-        distil = (distil - mean) / std
-
-    if args.save_intermediate:
-        inter = output_path.with_name(output_path.stem + "_ar" + output_path.suffix)
-        torchaudio.save(str(inter), audio_mimi.float().cpu(), MIMI_SR)
-        print_info("Intermediate", str(inter), Colors.OKCYAN)
-
-    print_info("Distil latent",
-               f"{tuple(distil.shape)}  ({distil.shape[1] / (BLUE_SR / BLUE_HOP):.2f}s)")
-    print_info("Time", f"{timings['codec']:.3f}s")
-
-    # --- Stage 3: distil latent -> data latent -> audio ---------------------
-    print_section("Stage 3 — EchoFM")
+    # --- Stage 2: prosody tokens -> data latent -----------------------------
+    # The Mimi decode / BlueCodec re-encode that used to sit here is gone: it
+    # existed only to build a distil for the transport to start from, and the
+    # transport now starts from noise with the tokens as conditioning. That also
+    # takes a lossy 2-codebook audio round trip out of the pipeline.
+    print_section("Stage 2 — EchoFM")
     generator = None
     if args.seed is not None:
         generator = torch.Generator(device=device).manual_seed(args.seed)
-    # Layer 0 of what stage 1 just produced: the prosody stream EchoFM renders.
     prosody = codes[..., 0]                                          # (1, T_ar)
     with _timed("fm", device, timings):
-        latent = fm_model.sample(text_ids, distil, prosody, args.steps, args.cfg,
+        latent = fm_model.sample(text_ids, prosody, args.steps, args.cfg,
                                  args.solver, generator=generator)
     if stats is not None:
         mean, std = stats
         latent = latent * std + mean
+
+    if args.save_intermediate:
+        with torch.no_grad():
+            audio_mimi = decode_mimi(mimi, codes.transpose(1, 2))    # (1, T) @ 24 kHz
+        inter = output_path.with_name(output_path.stem + "_ar" + output_path.suffix)
+        torchaudio.save(str(inter), audio_mimi.float().cpu(), MIMI_SR)
+        print_info("Intermediate", str(inter), Colors.OKCYAN)
+
+    print_info("Latent", f"{tuple(latent.shape)}  "
+                         f"({latent.shape[1] / (BLUE_SR / BLUE_HOP):.2f}s)")
     print_info("Time", f"{timings['fm']:.3f}s  ({1000 * timings['fm'] / args.steps:.1f} ms/step)")
 
     with _timed("decode", device, timings):
