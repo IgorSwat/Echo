@@ -37,17 +37,29 @@ def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     Only the fields the samples actually carry are collated, so this works for
     any combination of the dataset's `load_*` switches.
 
-        text    (B, S)      long   | latent  (B, T, C)   float
-        codec   (B, T_c, L) long   | distil  (B, T, C)   float
+        text        (B, S)      long   | latent  (B, T, C)   float
+        codec       (B, T_c, L) long   | distil  (B, T, C)   float
+        ref_text    (B, S_r)    long   | ref_codec (B, T_r, L) long
     """
     fields = batch[0].keys()
     out: dict[str, torch.Tensor] = {}
 
-    # --- Text ---
-    texts = [s["text"] for s in batch]
-    lengths = torch.tensor([t.size(0) for t in texts], dtype=torch.long)
-    out["text"] = _padded(texts, lengths, config.text_pad)
-    out["text_key_padding_mask"] = _mask(lengths)
+    # --- Token streams: each one padded on its own axis ---
+    # The reference halves are separate entries rather than being spliced onto
+    # the target here; the model merges them itself, since only it knows where
+    # the separators go.
+    for name, fill in (
+        ("text", config.text_pad),
+        ("ref_text", config.text_pad),
+        ("codec", config.prosody_pad),
+        ("ref_codec", config.prosody_pad),
+    ):
+        if name not in fields:
+            continue
+        seqs = [s[name] for s in batch]
+        lengths = torch.tensor([t.size(0) for t in seqs], dtype=torch.long)
+        out[name] = _padded(seqs, lengths, fill)
+        out[f"{name}_key_padding_mask"] = _mask(lengths)
 
     # --- Latents: `latent` and `distil` share one temporal grid ---
     frames = {
@@ -69,12 +81,5 @@ def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         for name, seqs in frames.items():
             out[name] = _padded(seqs, lengths, 0.0)
             out[f"{name}_key_padding_mask"] = mask
-
-    # --- Codec tokens: a coarser grid, padded on its own ---
-    if "codec" in fields:
-        codes = [s["codec"] for s in batch]
-        lengths = torch.tensor([c.size(0) for c in codes], dtype=torch.long)
-        out["codec"] = _padded(codes, lengths, config.prosody_pad)
-        out["codec_key_padding_mask"] = _mask(lengths)
 
     return out

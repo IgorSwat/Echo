@@ -32,7 +32,7 @@
       "conv_use_norm": true
     },
     "decoder": {
-      "num_layers": 10,
+      "num_layers": 12,
       "num_heads": 8,
       "ffn_dim": 2048,
       "ffn_glu": false,
@@ -85,8 +85,8 @@
   },
   "training": {
     "ar": {
-      "data_dir": "data/ljspeech",
-      "output_dir": "checkpoints/ljspeech",
+      "data_dir": "data/librispeech",
+      "output_dir": "checkpoints/librispeech",
       "batch_size": 16,
       "num_epochs": 30,
       "val_ratio": 0.05,
@@ -101,15 +101,15 @@
       "seed": 42,
       "ctc_weight": 0.2,
       "history_mask_max": 0.15,
-      "history_mask_start_epoch": 3,
+      "history_mask_start_epoch": 10,
       "history_mask_step": 0.03,
       "history_mask_span_min": 2,
       "history_mask_span_max": 5,
       "history_mask_token_frac": 0.33
     },
     "fm": {
-      "data_dir": "data/ljspeech",
-      "output_dir": "checkpoints/ljspeech",
+      "data_dir": "data/librispeech",
+      "output_dir": "checkpoints/librispeech",
       "batch_size": 16,
       "num_epochs": 30,
       "val_ratio": 0.05,

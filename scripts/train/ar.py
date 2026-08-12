@@ -30,7 +30,14 @@ from __style__ import Colors, print_header, print_info, print_section, print_sep
 from echo import config
 from echo.ar_model import EchoAR
 from echo.config import TrainingConfig
+from echo.nn.sequence import merge_padded
 from echo.training.dataset import EchoDataset
+
+
+# Shortest utterance that may serve as a reference, in 12.5 Hz frames. At 4s
+# every LibriSpeech speaker still has candidates to spare; a little above it a
+# handful of speakers run out entirely.
+MIN_REF_FRAMES = 50
 
 
 # -------------------
@@ -144,6 +151,25 @@ def _add_bos_eos(
     return seq, seq_mask                                             # (B, T+2, L), (B, T+2)
 
 
+def _target_span(
+    hidden: torch.Tensor,                                            # (B, F, hidden_dim)
+    offset: torch.Tensor,                                            # (B,) target start
+    width: int,                                                      # target frames
+) -> torch.Tensor:
+    """
+    Cut the target half out of states that span the merged sequence.
+
+    Each row's target begins at its own offset, so this is a gather rather than
+    a slice. Rows shorter than `width` read past their end; those positions fall
+    outside the length CTC is told about and never reach the loss.
+    """
+
+    idx = offset[:, None] + torch.arange(width, device=hidden.device)[None, :]
+    idx = idx.clamp(max=hidden.shape[1] - 1)                         # (B, width)
+
+    return hidden.gather(1, idx[..., None].expand(-1, -1, hidden.shape[-1]))
+
+
 def _ctc_loss(
     model: EchoAR,
     hidden: torch.Tensor,                                            # (B, T, hidden_dim)
@@ -203,6 +229,14 @@ def _ar_loss(
     one frame: the model reads frame i and predicts frame i+1, which also keeps
     BOS out of the targets. Padded targets drop out via `ignore_index`.
 
+    The reference recording rides in front of the frame stream, so the model's
+    logits span `[ref_frames] <bos> [inputs]` and only the target half carries
+    supervision. The reference positions are filled with pad and vanish through
+    the same `ignore_index` the padded tail uses. BOS is never a *target* — but
+    its position still is, and has to be: it is where the first real frame gets
+    predicted from the reference and the text alone, which is the one step voice
+    cloning lives or dies on.
+
     NOTE: under intra-frame conditioning the target frame's lower layers come
     back as `cond_tokens` — teacher forcing along the codebook axis. The top
     layer is never fed to itself, so no head sees its own label.
@@ -213,6 +247,11 @@ def _ar_loss(
     codec_mask = batch["codec_key_padding_mask"].to(device)          # (B, T)
     text_mask = batch["text_key_padding_mask"].to(device)            # (B, S)
 
+    ref_codec = batch["ref_codec"].to(device)                        # (B, T_ref, 2)
+    ref_codec_mask = batch["ref_codec_key_padding_mask"].to(device)  # (B, T_ref)
+    ref_text = batch["ref_text"].to(device)                          # (B, S_ref)
+    ref_text_mask = batch["ref_text_key_padding_mask"].to(device)    # (B, S_ref)
+
     seq, seq_mask = _add_bos_eos(codec, codec_mask)                  # (B, T+2, 2), (B, T+2)
     inputs = seq[:, :-1]                                             # (B, T + 1, 2)
     targets = seq[:, 1:]                                             # (B, T + 1, 2)
@@ -221,18 +260,36 @@ def _ar_loss(
     # short of the EOS itself (which is only ever a target, never read).
     input_mask = seq_mask[:, 1:]                                     # (B, T + 1)
 
-    # Only the history the model *reads* is corrupted. The targets stay clean —
-    # the model is asked to predict the true next frame despite a damaged
-    # history — and so do `cond_tokens`, which are intra-frame teacher forcing
-    # along the codebook axis, not history.
+    # Only the history the model *reads* is corrupted, and only the target half
+    # of it: the reference is clean at inference too, so damaging it would teach
+    # a robustness the model never needs. The targets stay clean as well — the
+    # model is asked to predict the true next frame despite a damaged history —
+    # and so do `cond_tokens`, which are intra-frame teacher forcing along the
+    # codebook axis, not history.
     inputs = _corrupt_history(inputs, input_mask, mask_rate, config.training.ar)
 
     cond_tokens = targets[..., :-1] if config.ar_model.head_intra_frame_cond else None
 
+    # Everything laid out along the frame axis is pushed back by the reference
+    # exactly as the model pushes it back, through the same function and the same
+    # masks. That makes the alignment structural: there is no length to compute
+    # and get wrong, and `offset` comes back for the CTC slice below.
+    ref_pad = torch.full_like(ref_codec, config.prosody_pad)
+    targets, _, offset = merge_padded(
+        ref_pad, ref_codec_mask, targets, input_mask, fill=config.prosody_pad,
+    )                                                                # (B, F, 2), _, (B,)
+    if cond_tokens is not None:
+        cond_tokens, _, _ = merge_padded(
+            ref_pad[..., :cond_tokens.shape[-1]], ref_codec_mask,
+            cond_tokens, input_mask, fill=config.prosody_pad,
+        )                                                            # (B, F, 1)
+
     want_ctc = ctc_weight > 0.0 and config.ar_model.ctc_enabled
     out = model(inputs, text, input_mask, text_mask,
-                cond_tokens=cond_tokens, return_hidden=want_ctc)
-    logits, hidden = out if want_ctc else (out, None)                # (B, T + 1, 2, V)
+                cond_tokens=cond_tokens, return_hidden=want_ctc,
+                ref_codec=ref_codec, ref_codec_padding_mask=ref_codec_mask,
+                ref_text=ref_text, ref_text_padding_mask=ref_text_mask)
+    logits, hidden = out if want_ctc else (out, None)                # (B, F, 2, V)
 
     ce = F.cross_entropy(
         logits.reshape(-1, logits.shape[-1]),
@@ -242,7 +299,13 @@ def _ar_loss(
     if not want_ctc:
         return ce, ce.detach(), torch.zeros((), device=ce.device)
 
-    ctc = _ctc_loss(model, hidden, text, input_mask, text_mask)
+    # CTC scores the target utterance against the target transcript, so it reads
+    # the target half only. Running it across the reference as well would ask a
+    # different question and put the term on a different scale.
+    ctc = _ctc_loss(
+        model, _target_span(hidden, offset, input_mask.shape[1]),
+        text, input_mask, text_mask,
+    )
 
     return ce + ctc_weight * ctc, ce.detach(), ctc.detach()
 
@@ -265,14 +328,25 @@ def main() -> None:
 
     # --- Data ---------------------------------------------------------------
     manifest = phonemes_csv(data_dir)
-    dataset = EchoDataset(
-        manifest, None, None, load_tokenizer(),
+    fields = dict(
         codec_dir=data_dir / "codecs",
         codec_layers=EchoAR.NUM_TOKEN_LAYERS,
         load_latent=False,                         # the AR model runs on codec tokens only
         load_distil=False,
+        load_reference=True,                       # same-speaker (ref_text, ref_codec)
+        min_ref_frames=MIN_REF_FRAMES,
     )
+    dataset = EchoDataset(manifest, None, None, load_tokenizer(), **fields)
     train_loader, val_loader, train_set, val_set = split_loaders(dataset, cfg)
+
+    # Validation gets one fixed reference per utterance. Resampling them every
+    # epoch would move val CE for reasons that have nothing to do with the
+    # model, and checkpoint selection reads that number. The twin parses the
+    # same manifest in the same order, so the split's indices still point at the
+    # same utterances.
+    val_set.dataset = EchoDataset(
+        manifest, None, None, load_tokenizer(), reference_seed=cfg.seed, **fields,
+    )
 
     # --- Model / optimizer --------------------------------------------------
     model = EchoAR().to(device)
@@ -286,6 +360,11 @@ def main() -> None:
     print_info("Manifest", manifest.name, Colors.OKCYAN if manifest.name != "phonemes.csv"
                else Colors.WARNING)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
+    print_info("Reference conditioning",
+               f"same-speaker, whole utterances >= {MIN_REF_FRAMES} frames "
+               f"({MIN_REF_FRAMES / 12.5:.1f}s) over "
+               f"{len(dataset._by_speaker)} speakers; validation references fixed",
+               Colors.OKCYAN)
     print_info("Codec layers", str(EchoAR.NUM_TOKEN_LAYERS))
     print_info("Prosody vocab", f"{config.prosody_vocab_size:,} (pad {config.prosody_pad}, "
                                 f"bos {config.prosody_bos}, eos {config.prosody_eos})")

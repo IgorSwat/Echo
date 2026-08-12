@@ -4,6 +4,7 @@ from echo.components.codec_embedder import CodecEmbedder
 from echo.components.multihead_predictor import MultiHeadPredictor
 from echo.components.text_encoder import TextEncoder
 
+from echo.nn.sequence import valid_mask
 from echo.nn.transformer import HybridAttentionDecoder
 from echo.nn.types import HybridKVCache
 
@@ -154,6 +155,38 @@ class EchoAR(nn.Module):
             text, text_padding_mask, ref_text, ref_text_padding_mask,
         )                                                            # (B, S', d_text), (B, S')
 
+    @staticmethod
+    def merged_frame_counts(
+        x: torch.Tensor,                                             # (B, T, 2) long
+        padding_mask: Optional[torch.Tensor] = None,                 # (B, T) or None
+        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, 2) or None
+        ref_codec_padding_mask: Optional[torch.Tensor] = None,       # (B, T_ref) or None
+    ) -> tuple[torch.Tensor, int]:
+        """Where each row's target half starts, and how long the merge runs.
+
+        The merge compacts both halves, so a row occupies `ref_len + target_len`
+        positions and the batch needs `max` of that — *not* the sum of the two
+        padded widths. Those two agree only when the longest reference and the
+        longest target happen to be the same row, so the naive version silently
+        over-counts on most batches.
+
+        Everything laid out along the merged axis is built from this: the
+        `cond_tokens` handed to :meth:`forward`, and the slice that recovers the
+        target frames from logits spanning the whole sequence.
+        """
+
+        B, T = x.shape[:2]
+        target = valid_mask(padding_mask, B, T, x.device).sum(1)     # (B,)
+
+        if ref_codec is None:
+            offset = torch.zeros_like(target)
+        else:
+            offset = valid_mask(
+                ref_codec_padding_mask, B, ref_codec.shape[1], x.device
+            ).sum(1)                                                 # (B,)
+
+        return offset, int((offset + target).max())
+
     def ctc_log_probs(self, h: torch.Tensor) -> torch.Tensor:
         """
         Per-frame phoneme log-probabilities for the CTC loss.
@@ -234,6 +267,11 @@ class EchoAR(nn.Module):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         """
         A forward pass through the model.
+
+        With a reference the frame axis is the merged `[ref_frames] <bos> [x]`,
+        so the logits cover the reference too and `cond_tokens` must span that
+        sequence rather than `x`. :meth:`merged_frame_counts` gives both its
+        length and the per-row index where the target half starts.
         """
 
         h, caches = self._trunk(
@@ -243,8 +281,23 @@ class EchoAR(nn.Module):
 
         if self.predictor.uses_cond and cond_tokens is None:
             raise ValueError("intra_frame_cond is enabled; forward() needs `cond_tokens`")
-        if cond_tokens is not None and start_pos > 0:
-            cond_tokens = cond_tokens[:, start_pos:]                 # follow the `x` slice
+
+        if cond_tokens is not None:
+            # Caught here rather than several layers down in the predictor's
+            # FiLM, where the mismatch surfaces as a bare broadcast error.
+            frames = start_pos + h.shape[1]
+            if cond_tokens.shape[1] != frames:
+                raise ValueError(
+                    f"`cond_tokens` spans {cond_tokens.shape[1]} frames but the "
+                    f"sequence has {frames}. With a reference the axis is the "
+                    f"merged `[ref_frames] <bos> [x]`, whose length is "
+                    f"max(ref_len + target_len) over the batch — not the sum of "
+                    f"the two padded widths, which over-counts unless the "
+                    f"longest reference and the longest target are the same row. "
+                    f"Use EchoAR.merged_frame_counts()."
+                )
+            if start_pos > 0:
+                cond_tokens = cond_tokens[:, start_pos:]             # follow the `h` slice
 
         # Layer j is embedded with its own input table, so the predictor's FiLM
         # reads the same alphabet the decoder does.
