@@ -23,8 +23,9 @@ class TrainingConfig:
     early_stop: int
     seed: int
 
-    # Classifier-free guidance dropout; only the flow-matching run uses it.
-    text_dropout: float = 0.0
+    # Classifier-free guidance dropout; only the flow-matching run uses it. The
+    # prosody stream is what gets dropped, since that is what guidance sharpens.
+    prosody_dropout: float = 0.0
 
     # Weight of the CTC auxiliary loss; only the autoregressive run uses it.
     ctc_weight: float = 0.0

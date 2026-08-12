@@ -33,7 +33,7 @@ def _flow_matching_loss(
     model: EchoFM,
     batch: dict[str, torch.Tensor],
     device: torch.device,
-    text_dropout_p: float = 0.0,
+    prosody_dropout_p: float = 0.0,
 ) -> torch.Tensor:
     """Interpolate between Gaussian noise x0 and data x1; predict x1 - x0.
 
@@ -45,9 +45,12 @@ def _flow_matching_loss(
     noise, which is ordinary conditional flow matching.
 
 
-    With probability ``text_dropout_p`` (per sample) the text conditioning is
-    replaced by the model's learned null-text condition, which is what enables
-    classifier-free guidance at inference.
+    With probability ``prosody_dropout_p`` (per sample) the prosody stream is
+    replaced by the model's learned null condition. That is what enables
+    classifier-free guidance at inference, and it is also the only pressure
+    keeping the text branch alive: with the frame-aligned tokens always present
+    they explain the target on their own, the text cross-attention earns no
+    gradient, and the text encoder never leaves its initialization.
 
     The loss is a mean squared error over valid (non-padded) positions only.
     """
@@ -67,12 +70,12 @@ def _flow_matching_loss(
     xt = (1.0 - t[:, None, None]) * x0 + t[:, None, None] * x1
     target = x1 - x0
 
-    text_drop_mask = None
-    if text_dropout_p > 0.0:
-        text_drop_mask = torch.rand(x1.shape[0], device=device) < text_dropout_p
+    prosody_drop_mask = None
+    if prosody_dropout_p > 0.0:
+        prosody_drop_mask = torch.rand(x1.shape[0], device=device) < prosody_dropout_p
 
     pred = model(text, xt, prosody, t,
-                 text_mask, latent_mask, prosody_mask, text_drop_mask)
+                 text_mask, latent_mask, prosody_mask, prosody_drop_mask)
 
     mask = latent_mask.unsqueeze(-1).float()                         # (B, T, 1)
     sq_err = (pred - target).pow(2) * mask                           # (B, T, C)
@@ -146,7 +149,7 @@ def main() -> None:
         epoch_train_batches = 0
 
         for batch in train_loader:
-            loss = _flow_matching_loss(model, batch, device, cfg.text_dropout)
+            loss = _flow_matching_loss(model, batch, device, cfg.prosody_dropout)
             epoch_train_loss += loss.item()
             epoch_train_batches += 1
 

@@ -86,8 +86,13 @@ class EchoFM(nn.Module):
         # --- Main processing stack ---
         self.blocks, out_dim = self._build_blocks()
 
-        # Null-text condition for classifier-free guidance.
-        self.null_text = nn.Parameter(torch.zeros(1, 1, cfg.text_embedding_dim))
+        # The unconditional branch for classifier-free guidance drops the
+        # *prosody*, not the text: the tokens are what carries the content, so
+        # they are what guidance should sharpen. Dropping them in training is
+        # also the only thing that stops the concatenated stream from being
+        # sufficient on its own -- with it always present, the text branch gets
+        # no gradient worth following and never trains.
+        self.null_prosody = nn.Parameter(torch.zeros(1, 1, cfg.prosody_embedding_dim))
 
         self.final_norm = nn.LayerNorm(out_dim)
         self.out_proj = nn.Linear(out_dim, config.latent_dim)
@@ -210,21 +215,26 @@ class EchoFM(nn.Module):
         text_key_padding_mask: Optional[torch.Tensor] = None,       # (B, S) or None
         latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
         prosody_key_padding_mask: Optional[torch.Tensor] = None,    # (B, K) or None
-        text_drop_mask: Optional[torch.Tensor] = None,              # (B,) bool or None
+        prosody_drop_mask: Optional[torch.Tensor] = None,           # (B,) bool or None
     ) -> torch.Tensor:
         cond = self.time_encoder(time)                              # (B, cond_dim)
         text_enc = self.text_encoder(text, text_key_padding_mask)   # (B, S, hidden)
-
-        # Classifier-free guidance: swap in the learned null-text condition.
-        if text_drop_mask is not None and text_drop_mask.any():
-            null = self.null_text.expand_as(text_enc)               # (B, S, hidden)
-            text_enc = torch.where(text_drop_mask.view(-1, 1, 1), null, text_enc)
 
         # The prosody stream is frame-aligned, so it joins on the channel axis
         # and travels through the stack as part of the latent.
         prosody_enc = self.embed_prosody(
             prosody, latent.shape[1], prosody_key_padding_mask, latent_key_padding_mask,
         )                                                           # (B, T, prosody_dim)
+
+        # Classifier-free guidance: swap the whole stream for the learned null
+        # condition. The row keeps its text and its length, and loses only the
+        # tokens -- that is the branch guidance extrapolates away from.
+        if prosody_drop_mask is not None and prosody_drop_mask.any():
+            null = self.null_prosody.expand_as(prosody_enc)         # (B, T, prosody_dim)
+            prosody_enc = torch.where(
+                prosody_drop_mask.view(-1, 1, 1), null, prosody_enc
+            )
+
         x = torch.cat([latent, prosody_enc], dim=-1)                # (B, T, audio_in_dim)
         mask = latent_key_padding_mask
 
@@ -260,9 +270,9 @@ class EchoFM(nn.Module):
         One velocity evaluation at (x, t), with classifier-free guidance.
 
         NOTE: with cfg_scale != 1 the model runs batch-doubled (conditioned +
-        null-text) and extrapolates v_uncond + cfg * (v_cond - v_uncond). Only
-        the text is dropped -- the prosody stream carries the content and rides
-        along unchanged in both halves.
+        null-prosody) and extrapolates v_uncond + cfg * (v_cond - v_uncond). The
+        *prosody* is what gets dropped: it carries the content, so it is what
+        guidance should sharpen. The text rides along unchanged in both halves.
         """
 
         if cfg_scale == 1.0:
