@@ -108,6 +108,19 @@ def load_tokenizer() -> Tokenizer:
     return Tokenizer(REPO_ROOT / "models" / "phoneme_vocab.json")
 
 
+def phonemes_csv(data_dir: Path) -> Path:
+    """The manifest to train on: the train split when the corpus defines one.
+
+    `phonemes.csv` is the whole corpus, test splits included, so training on it
+    leaks every evaluation utterance into the training set. Corpora that ship a
+    `phonemes_train.csv` get that instead; the rest fall back to the full file.
+    """
+
+    split = data_dir / "phonemes_train.csv"
+
+    return split if split.is_file() else data_dir / "phonemes.csv"
+
+
 def print_run_summary(n_ok: int, n_fail: int, elapsed: float) -> None:
     """The closing block the preprocessing scripts share."""
     print_separator("═", 60)

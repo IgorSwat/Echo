@@ -17,6 +17,7 @@ from __common__ import (
     REPO_ROOT,
     build_optimizer,
     load_tokenizer,
+    phonemes_csv,
     save_checkpoint,
     seed_everything,
     select_device,
@@ -99,8 +100,9 @@ def main() -> None:
     tokenizer = load_tokenizer()
     latent_dir = data_dir / "latents"
     latent_stats = latent_dir / "latent_stats.npz"
+    manifest = phonemes_csv(data_dir)
     dataset = EchoDataset(
-        data_dir / "phonemes.csv", latent_dir, data_dir / "distils", tokenizer,
+        manifest, latent_dir, data_dir / "distils", tokenizer,
         latent_stats=latent_stats,
         load_codec=False,                          # flow matching runs on latents only
         norm_mode=config.latent_norm,
@@ -114,6 +116,8 @@ def main() -> None:
 
     print_section("Setup")
     print_info("Device", str(device), Colors.OKCYAN)
+    print_info("Manifest", manifest.name, Colors.OKCYAN if manifest.name != "phonemes.csv"
+               else Colors.WARNING)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
     print_info("Source noise",
                f"sigma {config.fm_model.source_noise:g}  (x0 = distil + sigma * eps)"

@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -46,6 +47,11 @@ def main() -> None:
     parser.add_argument("--limit", "--samples", dest="limit", type=int, default=None,
                         help="Only process the first N audio files.")
     args = parser.parse_args()
+
+    # BlueCodec's STFT reuses an `out` tensor that torch resizes on the first
+    # call; the deprecation notice is internal to the codec and says nothing
+    # about this script's inputs.
+    warnings.filterwarnings("ignore", message=".*An output with one or more elements was resized.*")
 
     audio_dir, output_dir = Path(args.audio_dir), Path(args.output_dir)
     if not audio_dir.is_dir():

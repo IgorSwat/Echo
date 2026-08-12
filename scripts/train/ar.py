@@ -19,6 +19,7 @@ from __common__ import (
     REPO_ROOT,
     build_optimizer,
     load_tokenizer,
+    phonemes_csv,
     save_checkpoint,
     seed_everything,
     select_device,
@@ -263,8 +264,9 @@ def main() -> None:
     print_separator()
 
     # --- Data ---------------------------------------------------------------
+    manifest = phonemes_csv(data_dir)
     dataset = EchoDataset(
-        data_dir / "phonemes.csv", None, None, load_tokenizer(),
+        manifest, None, None, load_tokenizer(),
         codec_dir=data_dir / "codecs",
         codec_layers=EchoAR.NUM_TOKEN_LAYERS,
         load_latent=False,                         # the AR model runs on codec tokens only
@@ -281,6 +283,8 @@ def main() -> None:
 
     print_section("Setup")
     print_info("Device", str(device), Colors.OKCYAN)
+    print_info("Manifest", manifest.name, Colors.OKCYAN if manifest.name != "phonemes.csv"
+               else Colors.WARNING)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
     print_info("Codec layers", str(EchoAR.NUM_TOKEN_LAYERS))
     print_info("Prosody vocab", f"{config.prosody_vocab_size:,} (pad {config.prosody_pad}, "
