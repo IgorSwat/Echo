@@ -113,18 +113,13 @@ def report_ar() -> None:
 
     print_section("Top-level components")
     components = [
-        (f"Token embeddings (x{len(model.embed)})", _count_params(model.embed)),
+        ("Token embeddings", _count_params(model.embed)),
         ("TextEncoder", _count_params(model.text_encoder)),
         ("Decoder", _count_params(model.decoder)),
-        (f"Heads (x{len(model.predictor.heads)})", _count_params(model.predictor.heads)),
+        ("Head", _count_params(model.head)),
     ]
     if model.in_proj is not None:
         components.insert(3, ("Input projection", _count_params(model.in_proj)))
-    if model.predictor.uses_cond:
-        components.append(
-            (f"Intra-frame FiLM (x{len(model.predictor.film)})",
-             _count_params(model.predictor.film))
-        )
 
     _print_components(components, total)
 
@@ -132,10 +127,8 @@ def report_ar() -> None:
     print_info("Total", _fmt(total), Colors.OKCYAN)
 
     print_section("Dimensions")
-    print_info("Token layers", model.NUM_TOKEN_LAYERS)
     print_info("Prosody vocab", _fmt(model.vocab_size))
-    print_info("Embedding dim", f"{model.emb_dim} (x{model.NUM_TOKEN_LAYERS} -> "
-                                f"{model.NUM_TOKEN_LAYERS * model.emb_dim})")
+    print_info("Embedding dim", str(model.emb_dim))
     print_info("Hidden dim", model.hidden_dim)
     print_info("Text context dim", config.ar_model.text_encoder_d_model)
 

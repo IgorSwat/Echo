@@ -38,6 +38,7 @@ from __common__ import (
     load_latent_stats,
     load_pairs_csv,
     load_tokenizer,
+    lowpass,
     select_device,
 )
 from __phonemize__ import add_phonemize_args, phonemize_args
@@ -69,8 +70,11 @@ def _generate(
     stats: Stats | None,
     args: argparse.Namespace,
     output_path: Path,
-) -> None:
-    """Integrate from noise, denormalize, decode, and write the waveform."""
+) -> float:
+    """Integrate from noise, denormalize, decode, and write the waveform.
+
+    Returns the fraction of energy the low-pass removed, or 0.0 when it is off.
+    """
     latent = model.sample(text_ids, prosody, args.steps, args.cfg, args.solver)
     if stats is not None:
         mean, std = stats
@@ -79,9 +83,20 @@ def _generate(
     audio = codec.decode(latent.transpose(1, 2)).squeeze(0).cpu()
     if audio.dim() == 1:
         audio = audio.unsqueeze(0)
+    audio = audio[..., : int(duration * BLUE_SR)]
+
+    # Band-limit last, on the finished waveform: the trim above is the only step
+    # that cares about sample positions, and a zero-phase filter preserves them.
+    removed = 0.0
+    if args.lowpass > 0:
+        before = float(audio.pow(2).sum())
+        audio = lowpass(audio, args.lowpass, BLUE_SR)
+        removed = 1.0 - float(audio.pow(2).sum()) / max(before, 1e-12)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(str(output_path), audio[..., : int(duration * BLUE_SR)], BLUE_SR)
+    torchaudio.save(str(output_path), audio, BLUE_SR)
+
+    return removed
 
 
 def _parse_args() -> argparse.Namespace:
@@ -106,6 +121,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--stats", type=str, default=None,
                         help="Path to latent_stats.npz. Defaults to "
                              "<data_dir>/latents/latent_stats.npz from the training config.")
+    parser.add_argument("--lowpass", type=float, default=0.0, metavar="HZ",
+                        help="Low-pass the output at this frequency (default: 0 = off). The "
+                             "sample rate is unchanged — this only removes content above HZ. "
+                             "For a 24 kHz source corpus try 11500: nothing above 12 kHz is "
+                             "real, and BlueCodec (a 44.1 kHz model) fabricates noise there.")
     parser.add_argument("--output", type=str, default="output.wav",
                         help="Output audio path (single-sample mode).")
     add_phonemize_args(parser)
@@ -113,6 +133,11 @@ def _parse_args() -> argparse.Namespace:
 
     if args.test_suite is None and (args.text is None or args.codec is None):
         parser.error("--text and --codec are required when --test-suite is not provided")
+    if args.lowpass < 0:
+        parser.error("--lowpass must be >= 0 (0 disables the filter)")
+    if args.lowpass >= BLUE_SR / 2:
+        parser.error(f"--lowpass must be below the {BLUE_SR // 2} Hz Nyquist frequency, "
+                     f"got {args.lowpass:g}")
 
     return args
 
@@ -152,6 +177,8 @@ def main() -> None:
     print_info("Checkpoint", args.model)
     print_info("Source", source)
     print_info("Sampler", f"{args.steps} {args.solver} steps, cfg {args.cfg:g}")
+    print_info("Low-pass", f"{args.lowpass:g} Hz (sample rate unchanged)"
+               if args.lowpass > 0 else "off")
     if args.test_suite is None:
         print_info("Language", args.language)
         if args.print_phonemes:
@@ -175,9 +202,11 @@ def main() -> None:
         text_ids = torch.tensor(
             [tokenizer.tokenize(phonemes)], dtype=torch.long, device=device
         )
-        _generate(model, codec, text_ids, prosody, duration, stats, args, output_path)
+        removed = _generate(model, codec, text_ids, prosody, duration, stats,
+                            args, output_path)
         print_info(f"[{i}/{len(jobs)}]",
-                   f"{codec_path.name} -> {output_path.name}  ({duration:.2f}s)",
+                   f"{codec_path.name} -> {output_path.name}  ({duration:.2f}s)"
+                   + (f"  [-{100 * removed:.2f}% energy]" if args.lowpass > 0 else ""),
                    Colors.OKGREEN)
 
     print_separator()

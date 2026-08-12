@@ -286,3 +286,27 @@ def decode_mimi(mimi, codes: torch.Tensor) -> torch.Tensor:
     audio = out[0] if isinstance(out, tuple) else out.audio_values
 
     return audio.squeeze(1)                                          # (B, T_audio)
+
+
+# ---------------
+# Output filtering
+# ---------------
+
+def lowpass(audio: torch.Tensor, cutoff: float, sample_rate: int) -> torch.Tensor:
+    """Zero-phase low-pass at ``cutoff`` Hz, leaving the sample rate untouched.
+
+    This is a filter, not a resample: every sample is kept, only content above
+    ``cutoff`` is removed. It exists because the source corpus is band-limited
+    well below BlueCodec's 22 kHz Nyquist — LJSpeech is a 24 kHz recording, so
+    nothing above 12 kHz is real, and the codec's decoder fills that empty top
+    band with broadband noise anyway, audible as a sizzle riding on the speech.
+
+    ``sosfiltfilt`` runs the filter forwards and backwards, so the result has no
+    group delay and any trims applied around this step stay sample-accurate.
+    """
+    from scipy.signal import butter, sosfiltfilt                     # arrives with librosa
+
+    sos = butter(8, cutoff / (sample_rate / 2), btype="low", output="sos")
+    filtered = sosfiltfilt(sos, audio.numpy(), axis=-1).copy()       # negative strides -> copy
+
+    return torch.from_numpy(filtered).float()

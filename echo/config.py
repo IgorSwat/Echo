@@ -138,10 +138,6 @@ class ARModelConfig:
     head_num_layers: int
     head_hidden_dim: int
     head_dropout: float
-    # When set, head k > 0 is FiLM-modulated by token layer k - 1 of the same
-    # frame, so a frame factorises as P(c0 | h) * P(c1 | c0, h) instead of
-    # assuming the layers are conditionally independent given h.
-    head_intra_frame_cond: bool = False
 
     # Auxiliary CTC head over the decoder states, used at training time only.
     # ``ctc_upsample`` widens the frame grid before the head: CTC needs at least
@@ -177,7 +173,6 @@ class ARModelConfig:
             head_num_layers=hd["num_layers"],
             head_hidden_dim=hd["hidden_dim"],
             head_dropout=hd["dropout"],
-            head_intra_frame_cond=hd.get("intra_frame_cond", False),
             ctc_enabled=ctc.get("enabled", False),
             ctc_upsample=ctc.get("upsample", 2),
         )

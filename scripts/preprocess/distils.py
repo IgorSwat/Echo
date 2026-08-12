@@ -111,27 +111,24 @@ def _block_sampled_codes(
     same fixed point as a sequential rollout at a fraction of the cost.
     """
 
-    gt = codes.transpose(1, 2)                                       # (B, T, layers)
-    boundary = (torch.arange(gt.shape[1], device=gt.device) % block == 0)[None, :, None]
+    gt = codes[:, 0]                                                 # (B, T) semantic layer
+    boundary = (torch.arange(gt.shape[1], device=gt.device) % block == 0)[None, :]
 
     gen = gt.clone()
     for _ in range(block):
         # The model's own tokens inside a block, the truth at its start.
-        history = torch.where(boundary, gt, gen)                     # (B, T, layers)
+        history = torch.where(boundary, gt, gen)                     # (B, T)
         inputs = torch.full_like(gt, config.prosody_bos)
         inputs[:, 1:] = history[:, :-1]                              # frame i reads frame i - 1
 
-        # Intra-frame conditioning reads the frame being predicted, so it comes
-        # from the previous pass rather than from the truth.
-        cond = gen[..., :-1] if model.predictor.uses_cond else None
-        gen = _draw(model(inputs, text, valid, text_mask, cond_tokens=cond),
-                    temperature, top_k)                              # (B, T, layers)
+        gen = _draw(model(inputs, text, valid, text_mask),
+                    temperature, top_k)                              # (B, T)
 
         # Padded frames are never read or written out; keeping the truth there
         # avoids feeding the next pass junk through the one time-crossing path.
-        gen = torch.where(valid[..., None], gen, gt)
+        gen = torch.where(valid, gen, gt)
 
-    return gen.transpose(1, 2).contiguous()                          # (B, layers, T)
+    return gen[:, None, :].contiguous()                              # (B, 1, T)
 
 
 def _batch_ar_inputs(

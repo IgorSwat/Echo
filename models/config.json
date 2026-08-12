@@ -42,8 +42,7 @@
     "head": {
       "num_layers": 2,
       "hidden_dim": 1024,
-      "dropout": 0.2,
-      "intra_frame_cond": true
+      "dropout": 0.2
     },
     "ctc": {
       "enabled": true, 

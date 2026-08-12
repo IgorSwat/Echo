@@ -269,7 +269,7 @@ def main() -> None:
 
             ar_codes = ar.generate(text_ids, max_frames=1000)
             ar_frames = int(ar_codes.shape[1])
-            ar_wav = decode_mimi(mimi, ar_codes.transpose(1, 2))
+            ar_wav = decode_mimi(mimi, ar_codes[:, None, :])
             ar_raw = blue.encode(torchaudio.functional.resample(
                 ar_wav, MIMI_SR, BLUE_SR)).transpose(1, 2).float()
             row["ar_frames"], row["gt_frames"] = ar_frames, int(gt_codes.shape[2])
@@ -280,7 +280,7 @@ def main() -> None:
             # does: the ground-truth tokens for the clean anchor, the AR model's
             # own for the AR row. Mixing them would measure neither.
             gt_prosody = gt_codes[:, 0].long()                       # (1, T_gt)
-            ar_prosody = ar_codes[..., 0].long()                     # (1, T_ar)
+            ar_prosody = ar_codes.long()                             # (1, T_ar)
 
             for src, raw, dtw, prosody in (("clean", clean_raw, False, gt_prosody),
                                            ("ar", ar_raw, True, ar_prosody)):

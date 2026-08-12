@@ -46,6 +46,7 @@ from __common__ import (
     load_checkpoint,
     load_latent_stats,
     load_tokenizer,
+    lowpass,
     select_device,
     sync_device,
 )
@@ -66,26 +67,6 @@ def _timed(name: str, device: torch.device, into: dict[str, float]):
     yield
     sync_device(device)
     into[name] = time.perf_counter() - t0
-
-
-def _lowpass(audio: torch.Tensor, cutoff: float, sample_rate: int) -> torch.Tensor:
-    """Zero-phase low-pass at ``cutoff`` Hz, leaving the sample rate untouched.
-
-    This is a filter, not a resample: every sample is kept, only content above
-    ``cutoff`` is removed. It exists because the source corpus is band-limited
-    well below BlueCodec's 22 kHz Nyquist — LJSpeech is a 24 kHz recording, so
-    nothing above 12 kHz is real, and the codec's decoder fills that empty top
-    band with broadband noise anyway, audible as a sizzle riding on the speech.
-
-    ``sosfiltfilt`` runs the filter forwards and backwards, so the result has no
-    group delay and the trims applied around this step stay sample-accurate.
-    """
-    from scipy.signal import butter, sosfiltfilt                     # arrives with librosa
-
-    sos = butter(8, cutoff / (sample_rate / 2), btype="low", output="sos")
-    filtered = sosfiltfilt(sos, audio.numpy(), axis=-1).copy()       # negative strides -> copy
-
-    return torch.from_numpy(filtered).float()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -243,7 +224,7 @@ def main() -> None:
     generator = None
     if args.seed is not None:
         generator = torch.Generator(device=device).manual_seed(args.seed)
-    prosody = codes[..., 0]                                          # (1, T_ar)
+    prosody = codes                                                  # (1, T_ar)
     with _timed("fm", device, timings):
         latent = fm_model.sample(text_ids, prosody, args.steps, args.cfg,
                                  args.solver, generator=generator)
@@ -253,7 +234,8 @@ def main() -> None:
 
     if args.save_intermediate:
         with torch.no_grad():
-            audio_mimi = decode_mimi(mimi, codes.transpose(1, 2))    # (1, T) @ 24 kHz
+            # Mimi wants (B, layers, T); the AR model produces the semantic layer only.
+            audio_mimi = decode_mimi(mimi, codes[:, None, :])        # (1, T) @ 24 kHz
         inter = output_path.with_name(output_path.stem + "_ar" + output_path.suffix)
         torchaudio.save(str(inter), audio_mimi.float().cpu(), MIMI_SR)
         print_info("Intermediate", str(inter), Colors.OKCYAN)
@@ -284,7 +266,7 @@ def main() -> None:
     # steps that care about sample positions, and this one preserves them.
     if args.lowpass > 0:
         before = float(audio.pow(2).sum())
-        audio = _lowpass(audio, args.lowpass, BLUE_SR)
+        audio = lowpass(audio, args.lowpass, BLUE_SR)
         removed = 1.0 - float(audio.pow(2).sum()) / max(before, 1e-12)
         print_info("Low-pass", f"{args.lowpass:g} Hz  ({100 * removed:.2f}% of energy removed, "
                                f"sample rate unchanged)", Colors.OKCYAN)
@@ -296,7 +278,6 @@ def main() -> None:
     print_section("Inference time")
     rows = [
         (f"EchoAR ({frames} frames)", timings["ar"]),
-        ("Mimi + BlueCodec (codec -> latent)", timings["codec"]),
         (f"EchoFM ({args.steps} {args.solver} steps)", timings["fm"]),
         ("BlueCodec decode (latent -> audio)", timings["decode"]),
     ]

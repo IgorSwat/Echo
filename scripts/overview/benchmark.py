@@ -139,10 +139,6 @@ def benchmark_ar(args: argparse.Namespace, device: torch.device) -> None:
 
     B = args.batch_size
     V = config.prosody_vocab_size
-    layers = model.NUM_TOKEN_LAYERS
-    # Intra-frame conditioning makes the lower token layers a required input.
-    needs_cond = model.predictor.uses_cond
-
     # --- Prefill: the whole token sequence in one pass, text encoded inline ---
     print_section("Prefill latency (ms per forward pass, text encoder included)")
 
@@ -150,11 +146,10 @@ def benchmark_ar(args: argparse.Namespace, device: torch.device) -> None:
     for t_tokens in T_TOKEN_VALUES:
         for t_text in T_TEXT_VALUES:
             text = torch.randint(0, config.text_vocab_size, (B, t_text), device=device)
-            x = torch.randint(0, V, (B, t_tokens, layers), device=device)
-            cond = x[..., :-1] if needs_cond else None
+            x = torch.randint(0, V, (B, t_tokens), device=device)
 
             secs[(t_tokens, t_text)] = _time(
-                lambda: model(x, text, cond_tokens=cond),
+                lambda: model(x, text),
                 warmup=args.warmup, iters=args.iters, device=device,
             )
 
@@ -174,24 +169,19 @@ def benchmark_ar(args: argparse.Namespace, device: torch.device) -> None:
     for t_hist in T_TOKEN_VALUES:
         for t_text in T_TEXT_VALUES:
             text = torch.randint(0, config.text_vocab_size, (B, t_text), device=device)
-            x_hist = torch.randint(0, V, (B, t_hist, layers), device=device)
+            x_hist = torch.randint(0, V, (B, t_hist), device=device)
 
             with torch.no_grad():
                 context = model.encode_text(text)                    # (B, S, d_text)
-                _, caches = model(
-                    x_hist, context=context,
-                    cond_tokens=x_hist[..., :-1] if needs_cond else None,
-                    return_cache=True,
-                )
+                _, caches = model(x_hist, context=context, return_cache=True)
 
             # The step reads the full sequence but `start_pos` drops everything
             # the caches already cover, leaving one frame to compute.
-            x_step = torch.randint(0, V, (B, t_hist + 1, layers), device=device)
-            cond_step = x_step[..., :-1] if needs_cond else None
+            x_step = torch.randint(0, V, (B, t_hist + 1), device=device)
 
             secs[(t_hist, t_text)] = _time(
                 lambda: model(x_step, context=context, kv_cache=caches,
-                              start_pos=t_hist, cond_tokens=cond_step, return_cache=True),
+                              start_pos=t_hist, return_cache=True),
                 warmup=args.warmup, iters=args.iters, device=device,
             )
 

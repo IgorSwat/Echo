@@ -73,7 +73,7 @@ def _corrupt_history(
     if rate <= 0.0:
         return inputs
 
-    B, T, L = inputs.shape
+    B, T = inputs.shape
     device = inputs.device
     span_min, span_max = cfg.history_mask_span_min, cfg.history_mask_span_max
     mean_span = (span_min + span_max) / 2.0
@@ -102,12 +102,12 @@ def _corrupt_history(
     # Most corrupted frames get a random real token; a minority get the mask
     # symbol, which the model may read but `generate` can never emit.
     use_mask = torch.rand(B, T, device=device) < cfg.history_mask_token_frac
-    random_tokens = torch.randint(0, EchoAR.CODEBOOK_SIZE, (B, T, L), device=device)
+    random_tokens = torch.randint(0, EchoAR.CODEBOOK_SIZE, (B, T), device=device)
     replacement = torch.where(
-        use_mask.unsqueeze(-1), torch.full_like(random_tokens, config.prosody_mask), random_tokens
+        use_mask, torch.full_like(random_tokens, config.prosody_mask), random_tokens
     )
 
-    return torch.where(corrupt.unsqueeze(-1), replacement, inputs)
+    return torch.where(corrupt, replacement, inputs)
 
 
 # --------
@@ -115,32 +115,32 @@ def _corrupt_history(
 # --------
 
 def _add_bos_eos(
-    codec: torch.Tensor,                                             # (B, T, L) right-padded
+    codec: torch.Tensor,                                             # (B, T) right-padded
     mask: torch.Tensor,                                              # (B, T) bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Wrap each sequence as `[BOS, frame_0 ... frame_{L-1}, EOS]`, right-padded.
+    Wrap each sequence as `[BOS, token_0 ... token_{T-1}, EOS]`, right-padded.
 
     NOTE: the tensor grows by two along time; positions past the EOS stay pad.
     """
 
-    B, T, L = codec.shape
+    B, T = codec.shape
     lengths = mask.sum(dim=1)                                        # (B,)
 
     seq = torch.full(
-        (B, T + 2, L), config.prosody_pad, dtype=codec.dtype, device=codec.device
+        (B, T + 2), config.prosody_pad, dtype=codec.dtype, device=codec.device
     )
     seq[:, 0] = config.prosody_bos
     # Copy real frames only: whatever sits in the padded region of `codec` must
     # not survive into the targets, where it would be supervised instead of
     # skipped by the loss's ignore_index.
-    seq[:, 1:T + 1] = codec.masked_fill(~mask.unsqueeze(-1), config.prosody_pad)
+    seq[:, 1:T + 1] = codec.masked_fill(~mask, config.prosody_pad)
     seq[torch.arange(B, device=codec.device), lengths + 1] = config.prosody_eos
 
     # BOS and EOS are both real positions, hence lengths + 2.
     seq_mask = torch.arange(T + 2, device=codec.device)[None] < (lengths + 2)[:, None]
 
-    return seq, seq_mask                                             # (B, T+2, L), (B, T+2)
+    return seq, seq_mask                                             # (B, T+2), (B, T+2)
 
 
 def _ctc_loss(
@@ -201,37 +201,29 @@ def _ar_loss(
     The BOS/EOS-wrapped sequence is split into input and target halves shifted by
     one frame: the model reads frame i and predicts frame i+1, which also keeps
     BOS out of the targets. Padded targets drop out via `ignore_index`.
-
-    NOTE: under intra-frame conditioning the target frame's lower layers come
-    back as `cond_tokens` — teacher forcing along the codebook axis. The top
-    layer is never fed to itself, so no head sees its own label.
     """
 
-    codec = batch["codec"].to(device)                                # (B, T, 2)
+    # One codebook, so the dataset's trailing layer axis is a singleton to drop.
+    codec = batch["codec"][..., 0].to(device)                        # (B, T)
     text = batch["text"].to(device)                                  # (B, S)
     codec_mask = batch["codec_key_padding_mask"].to(device)          # (B, T)
     text_mask = batch["text_key_padding_mask"].to(device)            # (B, S)
 
-    seq, seq_mask = _add_bos_eos(codec, codec_mask)                  # (B, T+2, 2), (B, T+2)
-    inputs = seq[:, :-1]                                             # (B, T + 1, 2)
-    targets = seq[:, 1:]                                             # (B, T + 1, 2)
+    seq, seq_mask = _add_bos_eos(codec, codec_mask)                  # (B, T+2), (B, T+2)
+    inputs = seq[:, :-1]                                             # (B, T + 1)
+    targets = seq[:, 1:]                                             # (B, T + 1)
     # Shifting the mask the same way as the targets leaves exactly the positions
     # that carry a supervised prediction: BOS plus every real frame, stopping
     # short of the EOS itself (which is only ever a target, never read).
     input_mask = seq_mask[:, 1:]                                     # (B, T + 1)
 
-    # Only the history the model *reads* is corrupted. The targets stay clean —
-    # the model is asked to predict the true next frame despite a damaged
-    # history — and so do `cond_tokens`, which are intra-frame teacher forcing
-    # along the codebook axis, not history.
+    # Only the history the model *reads* is corrupted; the targets stay clean, so
+    # the model is asked to predict the true next token despite a damaged past.
     inputs = _corrupt_history(inputs, input_mask, mask_rate, config.training.ar)
 
-    cond_tokens = targets[..., :-1] if config.ar_model.head_intra_frame_cond else None
-
     want_ctc = ctc_weight > 0.0 and config.ar_model.ctc_enabled
-    out = model(inputs, text, input_mask, text_mask,
-                cond_tokens=cond_tokens, return_hidden=want_ctc)
-    logits, hidden = out if want_ctc else (out, None)                # (B, T + 1, 2, V)
+    out = model(inputs, text, input_mask, text_mask, return_hidden=want_ctc)
+    logits, hidden = out if want_ctc else (out, None)                # (B, T + 1, V)
 
     ce = F.cross_entropy(
         logits.reshape(-1, logits.shape[-1]),
