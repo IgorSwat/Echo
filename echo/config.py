@@ -203,6 +203,10 @@ class EchoConfig:
 
     # Special tokens
     text_pad: int
+    # Separates the reference transcript from the target one when the text
+    # encoder runs in paired mode. The prosody stream reuses `prosody_bos` for
+    # the same job, so it needs no separator of its own.
+    text_sep: int
     prosody_pad: int
     prosody_bos: int
     prosody_eos: int
@@ -226,6 +230,7 @@ class EchoConfig:
             latent_norm=d.get("latent_norm", "dataset"),
             text_len_limit=d["limits"]["text_len"],
             text_pad=d["special_tokens"]["text_pad"],
+            text_sep=d["special_tokens"]["text_sep"],
             prosody_pad=d["special_tokens"]["prosody_pad"],
             prosody_bos=d["special_tokens"]["prosody_bos"],
             prosody_eos=d["special_tokens"]["prosody_eos"],

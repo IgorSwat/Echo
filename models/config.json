@@ -11,6 +11,7 @@
   },
   "special_tokens": {
     "text_pad": 0,
+    "text_sep": 255,
     "prosody_pad": 2048,
     "prosody_bos": 2049,
     "prosody_eos": 2050,

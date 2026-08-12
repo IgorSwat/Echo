@@ -131,7 +131,9 @@ class EchoFM(nn.Module):
         text_drop_mask: Optional[torch.Tensor] = None,              # (B,) bool or None
     ) -> torch.Tensor:
         cond = self.time_encoder(time)                              # (B, cond_dim)
-        text_enc = self.text_encoder(text, text_key_padding_mask)   # (B, S, hidden)
+        # The mask comes back unchanged here: only paired (reference) mode,
+        # which the flow-matching branch does not use, resizes the sequence.
+        text_enc, _ = self.text_encoder(text, text_key_padding_mask)  # (B, S, hidden)
 
         # Classifier-free guidance: swap in the learned null-text condition.
         if text_drop_mask is not None and text_drop_mask.any():
