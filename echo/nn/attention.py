@@ -138,6 +138,32 @@ class CrossAttention(nn.Module):
 
     ROPE_NORMS = ("query", "absolute")
 
+    # Geometric spread of the initial rotary frequencies, as in classic RoPE.
+    ROPE_BASE = 10000.0
+
+    # Frame count the "query" ladder is scaled to. Normalized positions live in
+    # [0, 1], so a frequency has to be multiplied by *some* nominal length to
+    # produce a real angle; this is that length. It only sets where the ladder
+    # sits — the normalization is what keeps the alignment slope invariant to
+    # each utterance's own length, which is the reason to prefer this scheme.
+    ROPE_REF_LEN = 512.0
+
+    @classmethod
+    def _theta_ladder(cls, rotary_dim: int, rope_norm: str) -> torch.Tensor:
+        """RoPE's frequency ladder: coarse dims place, fine dims resolve.
+
+        Under "absolute" the angle is ``pos * theta`` with raw indices, so the
+        ladder is per-position and spans one rotation per frame down to one per
+        ``ROPE_BASE`` frames. Under "query" the angle is ``(pos / len) * theta``,
+        so the same ladder is scaled by ``ROPE_REF_LEN`` to put it on the same
+        footing at a typical length.
+        """
+
+        scale = cls.ROPE_REF_LEN if rope_norm != "absolute" else 1.0
+        i = torch.arange(rotary_dim, dtype=torch.float32)
+
+        return scale * cls.ROPE_BASE ** (-i / rotary_dim)
+
     def __init__(
         self,
         d_query: int,
@@ -167,16 +193,26 @@ class CrossAttention(nn.Module):
         self.attn_drop_value = dropout
         self.resid_drop = nn.Dropout(dropout)
 
-        # Zero-init => identity rotation at the start of training. "absolute"
-        # keeps one set per stream, so their ratio — which sets the alignment
-        # slope — is learned.
+        # The frequencies start on RoPE's geometric ladder rather than at zero.
+        # Zero-init is a fixed point here, not a neutral starting point: with no
+        # rotation the attention has no positional signal, so nothing rewards
+        # having one, so the frequencies never grow. Under "query" that is fatal
+        # — positions are normalized to [0, 1], which makes theta itself the
+        # *total* rotation across the sequence, and it would have to climb past
+        # 2*pi from zero to complete even a single turn. "absolute" survives it
+        # only because raw positions multiply the gradient by the frame index.
+        #
+        # "absolute" keeps one ladder per stream, so their ratio — which sets
+        # the alignment slope between the two grids — is still learned; only
+        # the scale it starts from is fixed.
         if use_rope:
             self.rotary_dim = self.hd // 2
+            ladder = self._theta_ladder(self.rotary_dim, rope_norm)
             if rope_norm == "absolute":
-                self.theta_q = nn.Parameter(torch.zeros(self.rotary_dim))
-                self.theta_k = nn.Parameter(torch.zeros(self.rotary_dim))
+                self.theta_q = nn.Parameter(ladder.clone())
+                self.theta_k = nn.Parameter(ladder.clone())
             else:
-                self.theta = nn.Parameter(torch.zeros(self.rotary_dim))
+                self.theta = nn.Parameter(ladder.clone())
 
         init_weights_(self)
 
