@@ -14,12 +14,7 @@ import torch.nn as nn
 
 class EchoAR(nn.Module):
     """
-    EchoAR: text-conditioned autoregressive model over Mimi's semantic tokens.
-
-    One codebook, one sequence. Layer 0 is Mimi's single semantic quantizer,
-    distilled from WavLM; the acoustic layers above it are a separate RVQ that
-    carries timbre, is close to unpredictable frame to frame, and is EchoFM's
-    job rather than this model's.
+    EchoAR: text-conditioned autoregressive model over Mimi's semantic tokens (1 layer).
     """
 
     # How many codec layers the model reads and writes. Kept as a named constant

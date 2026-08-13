@@ -81,7 +81,7 @@ class ConvNeXtBlock(nn.Module):
         kernel_size: int = 7,
         use_ada_ln: bool = False,
         dropout: float = 0.0,
-        layer_scale_init: float = 1e-6,
+        layer_scale_init: Optional[float] = None,
         cond_dim: Optional[int] = None,
         mode: str = "bidirectional",
     ) -> None:
@@ -108,7 +108,17 @@ class ConvNeXtBlock(nn.Module):
         self.act = nn.GELU()
         self.pw2 = nn.Linear(4 * dim_out, dim_out)                  # pointwise project
 
-        # Per-channel layer scale, small-constant initialized.
+        # Per-channel layer scale. The small-constant init that ConvNeXt uses is
+        # there to start the residual branch closed -- but AdaLN-Zero's gate
+        # already does that, and stacking the two suppresses the branch from both
+        # ends: `gate == 0` zeroes the gradient to gamma and to the MLP, while
+        # `gamma == 1e-6` attenuates what reaches the gate. Measured at init, the
+        # conv blocks' gate gradient came out at 1e-8 against 7e-2 for the
+        # attention blocks, and gamma was still ~1e-2 after 17 epochs -- the
+        # branch never fully opens. So the layer scale starts at unity whenever a
+        # gate is present, and only carries the ConvNeXt constant without one.
+        if layer_scale_init is None:
+            layer_scale_init = 1.0 if use_ada_ln else 1e-6
         self.gamma = nn.Parameter(torch.full((dim_out,), layer_scale_init))
 
         self.drop = nn.Dropout(dropout)
