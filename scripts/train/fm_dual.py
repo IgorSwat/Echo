@@ -17,10 +17,14 @@ schedule anneals over exactly that many. Comparing two models means giving them
 the same step budget, and a budget that anneals early flatters whichever model
 converges fastest rather than whichever ends up best.
 
+The trunk shape is not a flag. It comes from ``fm_model.dual`` in
+``models/config.json``, the way the baseline's comes from ``fm_model.blocks``,
+so a checkpoint here is described by the config rather than by whichever command
+line produced it. Trying a different layout means editing that section.
+
 Usage:
     python scripts/train/fm_dual.py --steps 4000
     python scripts/train/fm_dual.py --steps 20000 --tag dual_long --val-every 500
-    python scripts/train/fm_dual.py --blocks 8 --dim-a 256 --dim-b 768
 """
 
 from __future__ import annotations
@@ -138,13 +142,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=None, help="Override the config seed.")
     p.add_argument("--out-dir", type=str, default=None,
                    help="Where checkpoints go (default: the config's output_dir).")
-    # Trunk shape, so a variant does not need a code edit.
-    p.add_argument("--blocks", type=int, default=6)
-    p.add_argument("--dim-a", type=int, default=256, help="Full-rate conv stream width.")
-    p.add_argument("--dim-b", type=int, default=768, help="Quarter-rate attention width.")
-    p.add_argument("--ffn-mult", type=float, default=2.0)
-    p.add_argument("--num-conv", type=int, default=2,
-                   help="ConvNeXt blocks per two-stream block (default: 2).")
 
     return p.parse_args()
 
@@ -197,10 +194,7 @@ def main() -> None:
     train_loader, val_loader, train_set, val_set = split_loaders(dataset, loader_cfg)
 
     # --- Model / optimizer --------------------------------------------------
-    model = EchoFMDual(
-        num_blocks=args.blocks, dim_a=args.dim_a, dim_b=args.dim_b,
-        ffn_mult=args.ffn_mult, num_conv=args.num_conv,
-    ).to(device)
+    model = EchoFMDual().to(device)
 
     total_steps = args.steps if args.steps else cfg.num_epochs * len(train_loader)
     sched_cfg = type(cfg)(**{**vars(cfg), "learning_rate": lr})
@@ -209,8 +203,10 @@ def main() -> None:
     print_section("Setup")
     print_info("Device", str(device), Colors.OKCYAN)
     print_info("Train / val samples", f"{len(train_set)} / {len(val_set)}")
-    print_info("Trunk", f"{args.blocks} blocks, conv {args.dim_a} / attn {args.dim_b}, "
-                        f"ffn x{args.ffn_mult:g}, {args.num_conv} conv per block")
+    dual = config.fm_model.dual
+    print_info("Trunk", f"{dual.num_blocks} blocks, conv {dual.dim_a} / attn "
+                        f"{dual.dim_b}, ffn x{dual.ffn_mult:g}, {dual.num_conv} "
+                        f"conv per block, head {dual.head_upsample}")
     print_info("Parameters", f"{sum(p.numel() for p in model.parameters()):,}")
     print_info("Batch size", str(batch_size))
     print_info("Learning rate", f"{lr:.2e}")

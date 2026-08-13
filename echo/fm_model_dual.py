@@ -22,17 +22,20 @@ class EchoFMDual(EchoFM):
     streams take the prosody embedding at their own rate, both run the length of
     the stack, and each block exchanges once in each direction.
 
-    The default layout puts 16 full-rate convolutions against 4 quarter-rate
-    attention blocks, exchanging after every fourth convolution. That asymmetry
-    is deliberate. A parameter on the full grid is applied at 600 positions and
-    one on the quarter grid at 150, so where the parameters sit decides how much
-    arithmetic they do and how many gradient samples they see. An earlier layout
-    (6 blocks of 2 convolutions, dim_a 256, dim_b 768) left 87.3% of the trunk on
-    the quarter grid, which bought 1.85x the baseline's parameters while doing
-    0.79x its compute -- each parameter doing 0.43x the work of a baseline one.
-    More weights, less learning per step. This layout puts 59.4% of the trunk on
-    the full grid instead, and being wider and shallower it also maps better onto
-    the hardware: 2.06x the compute of the old layout at 26% less wall clock.
+    The shape comes from ``fm_model.dual`` in the config, the same way the
+    baseline's comes from ``fm_model.blocks``; the shipped layout puts 16
+    full-rate convolutions against 4 quarter-rate attention blocks, exchanging
+    after every fourth convolution. That asymmetry is deliberate. A parameter on
+    the full grid is applied at 600 positions and one on the quarter grid at
+    150, so where the parameters sit decides how much arithmetic they do and how
+    many gradient samples they see. An earlier layout
+    (6 blocks of 2 convolutions, dim_a 256, dim_b 768) left 87.3% of the trunk
+    on the quarter grid, which bought 1.85x the baseline's parameters while
+    doing 0.79x its compute -- each parameter doing 0.43x the work of a baseline
+    one. More weights, less learning per step. The shipped layout puts 59.4% of
+    the trunk on the full grid instead, and being wider and shallower it also
+    maps better onto the hardware: 2.06x the compute of the old layout at 26%
+    less wall clock.
 
     The head reads both. Concatenating stream A with a reshape of stream B is
     lossless -- four quarter-rate frames of width ``dim_b`` are exactly
@@ -41,32 +44,28 @@ class EchoFMDual(EchoFM):
     through the other.
     """
 
-    def __init__(
-        self,
-        num_blocks: int = 4,
-        dim_a: int = 512,
-        dim_b: int = 512,
-        ffn_mult: float = 2.0,
-        num_heads: int = 8,
-        num_conv: int = 4,
-        head_hidden: int = 256,
-        dropout: float = 0.1,
-        head_upsample: str = "reshape",
-    ) -> None:
-        if head_upsample not in ("conv", "reshape"):
-            raise ValueError(f"head_upsample must be 'conv' or 'reshape', "
-                             f"got {head_upsample!r}")
-        if dim_b % DualStreamBlock.FACTOR != 0:
-            raise ValueError(f"dim_b ({dim_b}) must be divisible by "
-                             f"{DualStreamBlock.FACTOR} for the head's reshape")
+    def __init__(self) -> None:
+        # The trunk shape is stated in the config, the way the baseline's is.
+        # Nothing here takes an override: two runs of this class are then
+        # comparable by construction, and a checkpoint is readable from the
+        # config alone rather than from whichever flags produced it.
+        cfg = config.fm_model.dual
 
-        object.__setattr__(self, "_cfg", dict(
-            num_blocks=num_blocks, dim_a=dim_a, dim_b=dim_b, ffn_mult=ffn_mult,
-            num_heads=num_heads, num_conv=num_conv, dropout=dropout,
-        ))
+        if cfg.head_upsample not in ("conv", "reshape"):
+            raise ValueError(f"head_upsample must be 'conv' or 'reshape', "
+                             f"got {cfg.head_upsample!r}")
+        if cfg.dim_b % DualStreamBlock.FACTOR != 0:
+            raise ValueError(f"dim_b ({cfg.dim_b}) must be divisible by "
+                             f"{DualStreamBlock.FACTOR} for the head's reshape")
+        if cfg.dim_b % cfg.num_heads != 0:
+            raise ValueError(f"dim_b ({cfg.dim_b}) must be divisible by "
+                             f"num_heads ({cfg.num_heads})")
+
         super().__init__(audio_in_dim=config.latent_dim)
 
-        cfg = config.fm_model
+        dim_a, dim_b = cfg.dim_a, cfg.dim_b
+        dropout, head_upsample = cfg.dropout, cfg.head_upsample
+        head_hidden = cfg.head_hidden
         F_ = DualStreamBlock.FACTOR
 
         # Stems: each stream starts from the latent on its own grid, with the
@@ -133,17 +132,19 @@ class EchoFMDual(EchoFM):
     # ---------------
 
     def _build_blocks(self) -> tuple[nn.ModuleList, int]:
-        c = self._cfg
+        # Called from the base __init__, so it reads the config rather than
+        # anything this class has had a chance to store on itself yet.
+        c = config.fm_model.dual
         blocks = [
             DualStreamBlock(
-                dim_a=c["dim_a"], dim_b=c["dim_b"], cond_dim=self.cond_dim,
-                d_kv=self.hidden_dim, num_heads=c["num_heads"],
-                ffn_dim=int(c["ffn_mult"] * c["dim_b"]), num_conv=c["num_conv"],
-                dropout=c["dropout"],
+                dim_a=c.dim_a, dim_b=c.dim_b, cond_dim=self.cond_dim,
+                d_kv=self.hidden_dim, num_heads=c.num_heads,
+                ffn_dim=int(c.ffn_mult * c.dim_b), num_conv=c.num_conv,
+                dropout=c.dropout,
             )
-            for _ in range(c["num_blocks"])
+            for _ in range(c.num_blocks)
         ]
-        return nn.ModuleList(blocks), c["dim_a"] + c["dim_b"] // DualStreamBlock.FACTOR
+        return nn.ModuleList(blocks), c.dim_a + c.dim_b // DualStreamBlock.FACTOR
 
     def _init_weights(self) -> None:
         nn.init.normal_(self.prosody_embed.weight, mean=0.0, std=config.init_std)

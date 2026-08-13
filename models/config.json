@@ -79,7 +79,18 @@
       {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true},
       {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true},
       {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true}
-    ]
+    ],
+    "dual": {
+      "num_blocks": 4,
+      "dim_a": 512,
+      "dim_b": 512,
+      "ffn_mult": 2.0,
+      "num_heads": 8,
+      "num_conv": 4,
+      "head_hidden": 256,
+      "dropout": 0.1,
+      "head_upsample": "reshape"
+    }
   },
   "training": {
     "ar": {

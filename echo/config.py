@@ -63,6 +63,59 @@ class TrainingSections:
 
 
 @dataclass
+class FMDualConfig:
+    """Trunk shape for the two-stream :class:`EchoFMDual` variant.
+
+    The dual model shares everything else with the baseline -- the latent, the
+    conditioning encoders, the embedding widths above -- and differs only in
+    what sits between the stem and the head, which is what this section states.
+    ``blocks`` describes the single-stream trunk and is ignored by the dual
+    model; this describes the dual trunk and is ignored by the baseline.
+    """
+
+    # Number of DualStreamBlocks, each one `num_conv` full-rate ConvNeXt blocks
+    # against a single quarter-rate hybrid attention block.
+    num_blocks: int
+    num_conv: int
+
+    # Stream widths: A on the latent's own 86.13 Hz grid, B on a quarter of it.
+    # Where the parameters sit decides how much arithmetic they do -- a full-rate
+    # one is applied at four times as many positions as a quarter-rate one -- so
+    # these two numbers are the model's central trade-off, not just its size.
+    dim_a: int
+    dim_b: int
+
+    # Attention stream: heads and the FFN width as a multiple of `dim_b`.
+    num_heads: int
+    ffn_mult: float
+
+    # Hidden width of the two-layer output head reading both streams.
+    head_hidden: int
+
+    dropout: float
+
+    # How stream B reaches full rate for the head: "reshape" (lossless, packs
+    # `dim_b` channels into `dim_b // 4` at four times the rate) or "conv" (a
+    # stride-4 transposed convolution, which removes the reshape's phase-shared
+    # weight constraint and was measured not to pay for itself).
+    head_upsample: str = "reshape"
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FMDualConfig:
+        return cls(
+            num_blocks=d["num_blocks"],
+            num_conv=d["num_conv"],
+            dim_a=d["dim_a"],
+            dim_b=d["dim_b"],
+            num_heads=d["num_heads"],
+            ffn_mult=d["ffn_mult"],
+            head_hidden=d["head_hidden"],
+            dropout=d["dropout"],
+            head_upsample=d.get("head_upsample", "reshape"),
+        )
+
+
+@dataclass
 class FMModelConfig:
     text_embedding_dim: int
     time_embedding_dim: int
@@ -87,6 +140,10 @@ class FMModelConfig:
     # block in EchoFM.BLOCK_REGISTRY, plus that block's own parameters.
     blocks: list[dict[str, Any]]
 
+    # Trunk shape for the two-stream variant, which builds its own stack rather
+    # than reading `blocks`.
+    dual: FMDualConfig
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FMModelConfig:
         te = d["text_encoder"]
@@ -103,6 +160,7 @@ class FMModelConfig:
             text_encoder_use_rope=te["use_rope"],
             text_encoder_conv_use_norm=te["conv_use_norm"],
             blocks=list(d["blocks"]),
+            dual=FMDualConfig.from_dict(d["dual"]),
         )
 
 
