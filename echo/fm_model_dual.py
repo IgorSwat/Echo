@@ -3,7 +3,6 @@ from echo import config
 from echo.fm_model import EchoFM
 from echo.nn.conv import ConvNeXtBlock
 from echo.nn.dual_stream import DualStreamBlock
-from echo.nn.init import init_weights_
 
 from typing import Optional
 
@@ -51,9 +50,6 @@ class EchoFMDual(EchoFM):
         # config alone rather than from whichever flags produced it.
         cfg = config.fm_model.dual
 
-        if cfg.head_upsample not in ("conv", "reshape"):
-            raise ValueError(f"head_upsample must be 'conv' or 'reshape', "
-                             f"got {cfg.head_upsample!r}")
         if cfg.dim_b % DualStreamBlock.FACTOR != 0:
             raise ValueError(f"dim_b ({cfg.dim_b}) must be divisible by "
                              f"{DualStreamBlock.FACTOR} for the head's reshape")
@@ -64,8 +60,7 @@ class EchoFMDual(EchoFM):
         super().__init__(audio_in_dim=config.latent_dim)
 
         dim_a, dim_b = cfg.dim_a, cfg.dim_b
-        dropout, head_upsample = cfg.dropout, cfg.head_upsample
-        head_hidden = cfg.head_hidden
+        dropout, head_hidden = cfg.dropout, cfg.head_hidden
         F_ = DualStreamBlock.FACTOR
 
         # Stems: each stream starts from the latent on its own grid, with the
@@ -93,29 +88,17 @@ class EchoFMDual(EchoFM):
         # How stream B reaches full rate. The reshape is lossless but imposes a
         # phase-shared weight constraint: frame t reads a FIXED slice of the
         # channels chosen by t % 4, and out_proj applies one matrix to all four
-        # slices, so stream B has to make them interchangeable. It only partly
-        # does -- the four groups correlate 0.37 to 0.46 -- and it pays by
-        # importing stream A through the last block's A->B link at 2.1x its own
-        # residual, leaving the head's two inputs half redundant (97 of 192
-        # canonical directions above 0.5) and a 2.29% loss spread across phases
-        # against the baseline's 0.78%.
-        #
-        # "conv" removes that constraint: a stride-4 kernel-8 transposed
-        # convolution gives each output phase its own taps, and every frame sees
-        # all dim_b channels rather than a quarter. Measured at 1200 steps and
-        # lr 2e-4 it is 0.7808 against the reshape's 0.7771 -- slightly WORSE,
-        # for 1.18M more parameters. The mechanism is real and fixing it does
-        # not pay, at least at this budget, so the reshape stays the default and
-        # this is kept only so the comparison can be rerun.
+        # slices, so stream B has to make them interchangeable. On the 256/768
+        # layout it only partly did, costing a 2.29% loss spread across phases
+        # against the baseline's 0.78%, and a stride-4 transposed convolution
+        # giving each phase its own taps was tried as the fix. It was measured
+        # slightly WORSE (0.7808 against 0.7771 at 1200 steps) for 1.18M more
+        # parameters, and on this layout the artifact it addressed is gone
+        # anyway -- per-phase spread is 0.88% against the baseline's 0.81%, i.e.
+        # the baseline's own noise floor. So there is nothing left to fix and
+        # the alternative is gone with it.
         cat_dim = dim_a + dim_b // F_
         del self.final_norm                     # the base class's single norm
-        self.head_upsample = head_upsample
-        self.head_up = None
-        if head_upsample == "conv":
-            self.head_up = nn.ConvTranspose1d(
-                dim_b, dim_b // F_, 2 * F_, stride=F_, padding=F_ // 2,
-            )
-            init_weights_(self.head_up)
         self.norm_a = nn.LayerNorm(dim_a)
         self.norm_b = nn.LayerNorm(dim_b // F_)
         self.out_proj = nn.Sequential(
@@ -205,19 +188,10 @@ class EchoFMDual(EchoFM):
         for block in self.blocks:
             a, b = block(a, b, text_enc, cond, mask, mask_q, text_key_padding_mask)
 
-        # Learned, phase-free: each output frame is built from all dim_b channels
-        # of the source positions it overlaps, with its own taps.
-        #
-        # The masking is not optional here, the way it was under a reshape. That
-        # was strictly position-local -- frame t read group t // 4 and nothing
-        # else -- so padding could not reach a valid frame. A kernel-8 stride-4
-        # convolution spans two source positions, so the first padded group
-        # feeds the last two valid frames unless it is zeroed first.
-        if self.head_up is None:
-            b_full = b.reshape(B, frames, b.shape[-1] // F_)         # (B, T', dim_b/4)
-        else:
-            b_up = b if mask_q is None else b * mask_q.unsqueeze(-1).to(b.dtype)
-            b_full = self.head_up(b_up.transpose(1, 2)).transpose(1, 2)
+        # Strictly position-local: frame t reads group t // 4 and nothing else,
+        # so padding cannot reach a valid frame here and needs no masking. The
+        # block's B->A upsample is the one that does, and it masks.
+        b_full = b.reshape(B, frames, b.shape[-1] // F_)             # (B, T', dim_b/4)
         x = torch.cat([self.norm_a(a), self.norm_b(b_full)], dim=-1)
         out = self.out_proj(x)                                      # (B, T', latent_dim)
 

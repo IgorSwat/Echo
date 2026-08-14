@@ -104,7 +104,20 @@ class DualStreamBlock(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         for conv in self.convs:
             a = conv(a, cond, key_padding_mask)                     # (B, T, dim_a)
-        a = a + self.up(b.transpose(1, 2)).transpose(1, 2)          # (B, T, dim_a)
+
+        # Stream B is zeroed at its padded positions before the upsample, for
+        # the same reason the head does it: `up` has a kernel of 8 at stride 4,
+        # so it spans two source positions and the first padded quarter-frame
+        # would otherwise write into the last two valid frames -- and from
+        # there the convolutions of every later block spread it further back.
+        # Measured on a trained checkpoint without this, appending 40 masked
+        # frames moved the *valid* output by 8.9e-3 relative (0.13 on the last
+        # frame, still 3.8e-4 twenty-four frames in), which made an utterance's
+        # tail depend on whatever else shared its batch. The other direction
+        # already masks; this is the same guard, going the other way.
+        b_up = (b if packed_padding_mask is None
+                else b * packed_padding_mask.unsqueeze(-1).to(b.dtype))
+        a = a + self.up(b_up.transpose(1, 2)).transpose(1, 2)       # (B, T, dim_a)
 
         # Stream B reads what stream A just produced, so the exchange within a
         # block runs one way then the other rather than both from stale state.

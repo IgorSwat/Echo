@@ -206,10 +206,12 @@ def main() -> None:
     dual = config.fm_model.dual
     print_info("Trunk", f"{dual.num_blocks} blocks, conv {dual.dim_a} / attn "
                         f"{dual.dim_b}, ffn x{dual.ffn_mult:g}, {dual.num_conv} "
-                        f"conv per block, head {dual.head_upsample}")
+                        f"conv per block")
     print_info("Parameters", f"{sum(p.numel() for p in model.parameters()):,}")
     print_info("Batch size", str(batch_size))
     print_info("Learning rate", f"{lr:.2e}")
+    print_info("Prosody dropout", f"{cfg.prosody_dropout:g} (from the config's "
+                                  f"training.fm section)")
     print_info("Total steps", f"{total_steps} ({total_steps / max(len(train_loader), 1):.1f} epochs)")
     print_info("Validation", f"every {args.val_every} steps, on a fixed t-grid "
                              f"{VAL_TIMESTEPS}", Colors.OKCYAN)

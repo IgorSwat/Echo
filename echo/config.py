@@ -94,12 +94,6 @@ class FMDualConfig:
 
     dropout: float
 
-    # How stream B reaches full rate for the head: "reshape" (lossless, packs
-    # `dim_b` channels into `dim_b // 4` at four times the rate) or "conv" (a
-    # stride-4 transposed convolution, which removes the reshape's phase-shared
-    # weight constraint and was measured not to pay for itself).
-    head_upsample: str = "reshape"
-
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FMDualConfig:
         return cls(
@@ -111,7 +105,6 @@ class FMDualConfig:
             ffn_mult=d["ffn_mult"],
             head_hidden=d["head_hidden"],
             dropout=d["dropout"],
-            head_upsample=d.get("head_upsample", "reshape"),
         )
 
 
