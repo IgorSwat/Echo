@@ -90,6 +90,7 @@ def report_fm() -> None:
     _print_components([
         ("TimeEncoder", _count_params(model.time_encoder)),
         ("TextEncoder", _count_params(model.text_encoder)),
+        ("Stem", _count_params(model.stem)),
         ("Main blocks", _count_params(model.blocks)),
         ("Final norm + out_proj",
          _count_params(model.final_norm) + _count_params(model.out_proj)),

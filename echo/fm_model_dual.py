@@ -22,7 +22,7 @@ class EchoFMDual(EchoFM):
     the stack, and each block exchanges once in each direction.
 
     The shape comes from ``fm_model.dual`` in the config, the same way the
-    baseline's comes from ``fm_model.blocks``; the shipped layout puts 16
+    baseline's comes from ``fm_model.trunk``; the shipped layout puts 16
     full-rate convolutions against 4 quarter-rate attention blocks, exchanging
     after every fourth convolution. That asymmetry is deliberate. A parameter on
     the full grid is applied at 600 positions and one on the quarter grid at
@@ -113,6 +113,10 @@ class EchoFMDual(EchoFM):
     # ---------------
     # Stack assembly
     # ---------------
+
+    def _build_stem(self) -> tuple[nn.Module, int]:
+        # Each stream gets its own stem, built after the base __init__.
+        return nn.Identity(), self.audio_in_dim
 
     def _build_blocks(self) -> tuple[nn.ModuleList, int]:
         # Called from the base __init__, so it reads the config rather than

@@ -2,6 +2,11 @@ from echo import config
 
 from echo.fm_model import EchoFM
 from echo.nn.conv import ConvNeXtBlock
+from echo.nn.transformer_blocks import (
+    CrossAttentionBlock,
+    HybridAttentionBlock,
+    SelfAttentionBlock,
+)
 from echo.nn.two_stream import TwoStreamBlock
 
 from typing import Any, Optional
@@ -51,8 +56,16 @@ class EchoFM2S(EchoFM):
     rate nearly matches.
     """
 
-    BLOCK_REGISTRY = {**EchoFM.BLOCK_REGISTRY, "two_stream": TwoStreamBlock}
-    COND_TYPES = EchoFM.COND_TYPES | {"two_stream"}
+    # Maps the "type" in a block spec to its module class; every one of them
+    # accepts AdaLN conditioning.
+    BLOCK_REGISTRY = {
+        "convnext": ConvNeXtBlock,
+        "hybrid_attention": HybridAttentionBlock,
+        "self_attention": SelfAttentionBlock,
+        "cross_attention": CrossAttentionBlock,
+        "two_stream": TwoStreamBlock,
+    }
+    COND_TYPES = set(BLOCK_REGISTRY)
 
     def __init__(
         self,
@@ -88,6 +101,10 @@ class EchoFM2S(EchoFM):
     # ---------------
     # Stack assembly
     # ---------------
+
+    def _build_stem(self) -> tuple[nn.Module, int]:
+        # The first block reads the latent directly; there is no stem to lift it.
+        return nn.Identity(), self.audio_in_dim
 
     def _build_blocks(self) -> tuple[nn.ModuleList, int]:
         blocks: list[nn.Module] = []

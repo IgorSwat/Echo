@@ -45,7 +45,7 @@
       "dropout": 0.2
     },
     "ctc": {
-      "enabled": true, 
+      "enabled": true,
       "upsample": 2
     }
   },
@@ -63,23 +63,41 @@
       "use_rope": true,
       "conv_use_norm": true
     },
-    "blocks": [
-      {"type": "convnext",          "dim_in": 152, "dim_out": 152, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 152, "dim_out": 192, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 192, "dim_out": 192, "kernel_size": 7, "dropout": 0.1},
-      {"type": "hybrid_attention",  "d_model": 192, "d_kv": 256, "num_heads": 4, "ffn_dim": 768, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true},
-      {"type": "convnext",          "dim_in": 192, "dim_out": 224, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 224, "dim_out": 224, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 224, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
-      {"type": "hybrid_attention",  "d_model": 256, "d_kv": 256, "num_heads": 8, "ffn_dim": 1024, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true},
-      {"type": "convnext",          "dim_in": 256, "dim_out": 256, "kernel_size": 7, "dropout": 0.1},
-      {"type": "convnext",          "dim_in": 256, "dim_out": 512, "kernel_size": 7, "dropout": 0.1},
-      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true},
-      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true},
-      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true},
-      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true},
-      {"type": "hybrid_attention",  "d_model": 512, "d_kv": 256, "num_heads": 8, "ffn_dim": 2048, "dropout": 0.1, "use_rope": true, "rope_norm": "query", "use_ada_ln": true}
-    ],
+    "stem": {
+      "dim": 256,
+      "hidden_layers": 1,
+      "hidden_dim": 512
+    },
+    "trunk": {
+      "kernel_size": 7,
+      "num_heads": 8,
+      "ffn_mult": 4.0,
+      "dropout": 0.1,
+      "use_rope": true,
+      "rope_norm": "query",
+      "stages": [
+        {
+          "dim": 256,
+          "num_conv": 2,
+          "num_attention": 1
+        },
+        {
+          "dim": 384,
+          "num_conv": 2,
+          "num_attention": 1
+        },
+        {
+          "dim": 512,
+          "num_conv": 4,
+          "num_attention": 1
+        },
+        {
+          "dim": 640,
+          "num_conv": 4,
+          "num_attention": 1
+        }
+      ]
+    },
     "dual": {
       "num_blocks": 4,
       "dim_a": 512,

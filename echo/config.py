@@ -69,7 +69,7 @@ class FMDualConfig:
     The dual model shares everything else with the baseline -- the latent, the
     conditioning encoders, the embedding widths above -- and differs only in
     what sits between the stem and the head, which is what this section states.
-    ``blocks`` describes the single-stream trunk and is ignored by the dual
+    ``trunk`` describes the single-stream trunk and is ignored by the dual
     model; this describes the dual trunk and is ignored by the baseline.
     """
 
@@ -109,13 +109,76 @@ class FMDualConfig:
 
 
 @dataclass
+class FMStemConfig:
+    """Pointwise MLP lifting the concatenated input to the trunk's width."""
+
+    dim: int
+    hidden_layers: int = 1
+    hidden_dim: int | None = None                       # defaults to `dim`
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FMStemConfig:
+        return cls(
+            dim=d["dim"],
+            hidden_layers=d.get("hidden_layers", 1),
+            hidden_dim=d.get("hidden_dim"),
+        )
+
+
+@dataclass
+class FMStageConfig:
+    """One trunk stage: convolutions that widen to `dim`, then attention at it."""
+
+    dim: int
+    num_conv: int
+    num_attention: int = 1
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FMStageConfig:
+        return cls(
+            dim=d["dim"],
+            num_conv=d["num_conv"],
+            num_attention=d.get("num_attention", 1),
+        )
+
+
+@dataclass
+class FMTrunkConfig:
+    """Trunk shape: a stage list plus the settings its blocks share.
+
+    Widths only grow, so the last stage's `dim` is also the widest the stack
+    gets and what the output head reads.
+    """
+
+    stages: list[FMStageConfig]
+    kernel_size: int = 7
+    num_heads: int = 8
+    ffn_mult: float = 4.0
+    dropout: float = 0.1
+    use_rope: bool = True
+    rope_norm: str = "query"
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FMTrunkConfig:
+        return cls(
+            stages=[FMStageConfig.from_dict(s) for s in d["stages"]],
+            kernel_size=d.get("kernel_size", 7),
+            num_heads=d.get("num_heads", 8),
+            ffn_mult=d.get("ffn_mult", 4.0),
+            dropout=d.get("dropout", 0.1),
+            use_rope=d.get("use_rope", True),
+            rope_norm=d.get("rope_norm", "query"),
+        )
+
+
+@dataclass
 class FMModelConfig:
     text_embedding_dim: int
     time_embedding_dim: int
 
     # Width of the prosody token embedding. These are the AR stage's layer-0
     # (Mimi semantic) tokens: embedded, stretched onto the latent's frame grid,
-    # and concatenated to the latent along the channel axis, so the stack's
+    # and concatenated to the latent along the channel axis, so the stem's
     # input is ``latent_dim + prosody_embedding_dim`` wide.
     prosody_embedding_dim: int
 
@@ -129,12 +192,12 @@ class FMModelConfig:
     text_encoder_use_rope: bool
     text_encoder_conv_use_norm: bool
 
-    # Main processing stack. Each entry is a dict with a "type" key naming a
-    # block in EchoFM.BLOCK_REGISTRY, plus that block's own parameters.
-    blocks: list[dict[str, Any]]
+    # Input stem and the main processing stack it feeds.
+    stem: FMStemConfig
+    trunk: FMTrunkConfig
 
     # Trunk shape for the two-stream variant, which builds its own stack rather
-    # than reading `blocks`.
+    # than reading `trunk`.
     dual: FMDualConfig
 
     @classmethod
@@ -152,7 +215,8 @@ class FMModelConfig:
             text_encoder_dropout=te["dropout"],
             text_encoder_use_rope=te["use_rope"],
             text_encoder_conv_use_norm=te["conv_use_norm"],
-            blocks=list(d["blocks"]),
+            stem=FMStemConfig.from_dict(d["stem"]),
+            trunk=FMTrunkConfig.from_dict(d["trunk"]),
             dual=FMDualConfig.from_dict(d["dual"]),
         )
 

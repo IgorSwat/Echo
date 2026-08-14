@@ -4,11 +4,8 @@ from echo.components.text_encoder import TextEncoder
 from echo.components.time_encoder import TimeEncoder
 
 from echo.nn.conv import ConvNeXtBlock
-from echo.nn.transformer_blocks import (
-    CrossAttentionBlock,
-    HybridAttentionBlock,
-    SelfAttentionBlock,
-)
+from echo.nn.init import init_weights_
+from echo.nn.transformer_blocks import HybridAttentionBlock
 
 from typing import Optional
 
@@ -20,23 +17,11 @@ class EchoFM(nn.Module):
     """
     EchoFM: text-, prosody-, distil- and time-conditioned latent flow-matching backbone.
 
-    Prosody arrives as the AR stage's layer-0 (Mimi semantic) tokens on their own
-    12.5 Hz grid. They are frame-aligned with the audio, so they join the latent
-    by concatenation rather than cross-attention: stretching them onto the
-    latent's grid gives the stack a hard positional correspondence instead of an
-    alignment it would have to learn.
+    A pointwise stem lifts the latent (plus its prosody embedding) to the
+    trunk's starting width, the trunk alternates runs of ConvNeXt blocks with
+    single hybrid attention blocks, and a linear head projects the widest state
+    back to the latent.
     """
-
-    # Maps the "type" in a block spec to its module class.
-    BLOCK_REGISTRY = {
-        "convnext": ConvNeXtBlock,
-        "hybrid_attention": HybridAttentionBlock,
-        "self_attention": SelfAttentionBlock,
-        "cross_attention": CrossAttentionBlock,
-    }
-
-    # Block types that accept AdaLN conditioning (use_ada_ln / cond_dim).
-    COND_TYPES = {"convnext", "hybrid_attention", "self_attention", "cross_attention"}
 
     # ODE integrators available to :meth:`sample`.
     SOLVERS = ("euler", "midpoint")
@@ -44,8 +29,7 @@ class EchoFM(nn.Module):
     # Latent frames per prosody token: BlueCodec's 44100/512 = 86.13 Hz grid
     # against Mimi's 12.5 Hz one. The two do not divide, which is why the
     # stretch in :meth:`embed_prosody` is built per row from the real lengths;
-    # this constant is only used to *choose* a length when generating, where
-    # there is no target to measure.
+    # this constant only *chooses* a length when generating.
     LATENT_FRAMES_PER_TOKEN = (44100 / 512) / 12.5                  # 6.890625
 
     def __init__(self, audio_in_dim: Optional[int] = None) -> None:
@@ -57,7 +41,7 @@ class EchoFM(nn.Module):
         self.cond_dim = cfg.time_embedding_dim
         self.prosody_dim = cfg.prosody_embedding_dim
         # The prosody embedding rides alongside the latent on the channel axis,
-        # so the stack's first block is that much wider than the latent itself.
+        # so the stem reads that much more than the latent itself.
         self.audio_in_dim = (
             audio_in_dim if audio_in_dim is not None
             else config.latent_dim + self.prosody_dim
@@ -83,16 +67,16 @@ class EchoFM(nn.Module):
             max_seq_len=config.text_len_limit,
         )
 
-        # --- Main processing stack ---
-        self.blocks, out_dim = self._build_blocks()
-
         # The unconditional branch for classifier-free guidance drops the
         # *prosody*, not the text: the tokens are what carries the content, so
         # they are what guidance should sharpen. Dropping them in training is
         # also the only thing that stops the concatenated stream from being
-        # sufficient on its own -- with it always present, the text branch gets
-        # no gradient worth following and never trains.
+        # sufficient on its own.
         self.null_prosody = nn.Parameter(torch.zeros(1, 1, cfg.prosody_embedding_dim))
+
+        # --- Stem, trunk, head ---
+        self.stem, self.stem_dim = self._build_stem()
+        self.blocks, out_dim = self._build_blocks()
 
         self.final_norm = nn.LayerNorm(out_dim)
         self.out_proj = nn.Linear(out_dim, config.latent_dim)
@@ -103,56 +87,75 @@ class EchoFM(nn.Module):
     # Stack assembly
     # ---------------
 
+    def _build_stem(self) -> tuple[nn.Module, int]:
+        cfg = config.fm_model.stem
+        hidden = cfg.hidden_dim if cfg.hidden_dim is not None else cfg.dim
+
+        dims = [self.audio_in_dim] + [hidden] * cfg.hidden_layers + [cfg.dim]
+        layers: list[nn.Module] = []
+        for i, (d_in, d_out) in enumerate(zip(dims[:-1], dims[1:])):
+            if i:
+                layers.append(nn.GELU())
+            layers.append(nn.Linear(d_in, d_out))
+
+        return nn.Sequential(*layers), cfg.dim
+
     def _build_blocks(self) -> tuple[nn.ModuleList, int]:
+        cfg = config.fm_model.trunk
         blocks: list[nn.Module] = []
-        cur_dim = self.audio_in_dim
+        dim = self.stem_dim
 
-        for spec in config.fm_model.blocks:
-            spec = dict(spec)                                       # copy: don't mutate config
-            block_type = spec.pop("type", None)
-            if block_type is None:
-                raise ValueError(f"Block spec missing 'type' key: {spec}")
-            if block_type not in self.BLOCK_REGISTRY:
+        def convnext(dim_in: int, dim_out: int) -> nn.Module:
+            return ConvNeXtBlock(
+                dim_in=dim_in,
+                dim_out=dim_out,
+                kernel_size=cfg.kernel_size,
+                dropout=cfg.dropout,
+                use_ada_ln=True,
+                cond_dim=self.cond_dim,
+            )
+
+        def attention(dim: int) -> nn.Module:
+            return HybridAttentionBlock(
+                d_model=dim,
+                d_kv=self.hidden_dim,
+                num_heads=cfg.num_heads,
+                ffn_dim=int(cfg.ffn_mult * dim),
+                dropout=cfg.dropout,
+                use_rope=cfg.use_rope,
+                rope_norm=cfg.rope_norm,
+                use_ada_ln=True,
+                cond_dim=self.cond_dim,
+            )
+
+        for i, stage in enumerate(cfg.stages):
+            if stage.num_conv < 2 or stage.num_conv % 2 != 0:
                 raise ValueError(
-                    f"Unknown block type '{block_type}'. "
-                    f"Expected one of {list(self.BLOCK_REGISTRY)}"
+                    f"stage {i} has num_conv {stage.num_conv}; it must be even, so "
+                    f"the attention sits between the two halves of the stage"
+                )
+            if stage.dim < dim:
+                raise ValueError(
+                    f"stage {i} narrows the trunk from {dim} to {stage.dim}; "
+                    f"widths may only grow, since the head reads the widest one"
                 )
 
-            # AdaLN defaults, overridable per block.
-            if block_type in self.COND_TYPES:
-                spec.setdefault("use_ada_ln", True)
-                spec.setdefault("cond_dim", self.cond_dim)
+            # The stage's first convolution is what widens it; everything after
+            # runs at the stage's own width, with the attention in the middle of
+            # the convolutions rather than at the end.
+            before = stage.num_conv // 2
+            for j in range(before):
+                blocks.append(convnext(dim if j == 0 else stage.dim, stage.dim))
+            dim = stage.dim
 
-            # The config states every width, so it is checked rather than
-            # silently corrected: a spec that disagrees with what the previous
-            # block emits is a mistake to report, not one to paper over. The
-            # first block's input is the latent plus the prosody embedding.
-            width = spec.get("dim_in", spec.get("d_model"))
-            if width is not None and width != cur_dim:
-                first = " (latent + prosody embedding)" if not blocks else ""
-                key = "dim_in" if "dim_in" in spec else "d_model"
-                raise ValueError(
-                    f"block {len(blocks)} ({block_type}) declares {key} {width}, "
-                    f"but the stack is {cur_dim} wide at that point{first}. "
-                    f"Attention blocks do not reshape, so a width change has to "
-                    f"come from a convnext's dim_out."
-                )
+            blocks.extend(attention(dim) for _ in range(stage.num_attention))
+            blocks.extend(convnext(dim, dim) for _ in range(stage.num_conv - before))
 
-            blocks.append(self.BLOCK_REGISTRY[block_type](**spec))
-            cur_dim = self._infer_out_dim(block_type, spec)
-
-        return nn.ModuleList(blocks), cur_dim
-
-    @staticmethod
-    def _infer_out_dim(block_type: str, spec: dict) -> int:
-        if block_type == "convnext":
-            return spec["dim_out"]
-        if block_type in ("hybrid_attention", "self_attention", "cross_attention"):
-            return spec["d_model"]
-        raise ValueError(f"cannot infer output dim for block type '{block_type}'")
+        return nn.ModuleList(blocks), dim
 
     def _init_weights(self) -> None:
         # Submodules initialized themselves; this covers what EchoFM owns directly.
+        init_weights_(self.stem)
         nn.init.normal_(self.prosody_embed.weight, mean=0.0, std=config.init_std)
         nn.init.normal_(self.out_proj.weight, mean=0.0, std=config.init_std)
         nn.init.zeros_(self.out_proj.bias)
@@ -168,15 +171,8 @@ class EchoFM(nn.Module):
         prosody_key_padding_mask: Optional[torch.Tensor] = None,    # (B, K) or None
         latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
     ) -> torch.Tensor:
-        """Stretch the token grid onto the latent grid and embed it.
-
-        The two rates do not divide: Mimi runs at 12.5 Hz and the latents at
-        44100/512 = 86.13 Hz, and the realised ratio drifts per utterance with
-        the rounding at each end. So the mapping is built from each row's *own*
-        two lengths rather than a shared constant -- token
-        ``floor(t * K_b / T_b)`` for latent frame ``t`` -- which keeps a padded
-        batch aligned row by row. Nearest-neighbour is deliberate: the ConvNeXt
-        blocks that follow have a kernel of 7 and smooth the staircase anyway.
+        """
+        Stretch the token grid onto the latent grid and embed it.
         """
 
         B, K = prosody.shape
@@ -236,6 +232,7 @@ class EchoFM(nn.Module):
             )
 
         x = torch.cat([latent, prosody_enc], dim=-1)                # (B, T, audio_in_dim)
+        x = self.stem(x)                                            # (B, T, stem_dim)
         mask = latent_key_padding_mask
 
         for block in self.blocks:
@@ -243,14 +240,10 @@ class EchoFM(nn.Module):
                 # `mask` covers the latent it attends over, `text_key_padding_mask`
                 # the context it reads.
                 x, _ = block(x, text_enc, mask, text_key_padding_mask, cond)
-            elif isinstance(block, CrossAttentionBlock):
-                x, _ = block(x, text_enc, text_key_padding_mask, cond, mask)
-            elif isinstance(block, SelfAttentionBlock):
-                x, _ = block(x, mask, cond)
             else:                                                   # ConvNeXtBlock
-                x = block(x, cond, mask)                            # (B, T', d')
+                x = block(x, cond, mask)                            # (B, T, d')
 
-        x = self.final_norm(x)                                      # (B, T, hidden)
+        x = self.final_norm(x)                                      # (B, T, out_dim)
 
         return self.out_proj(x)                                     # (B, T, latent_dim)
 
@@ -268,11 +261,6 @@ class EchoFM(nn.Module):
     ) -> torch.Tensor:
         """
         One velocity evaluation at (x, t), with classifier-free guidance.
-
-        NOTE: with cfg_scale != 1 the model runs batch-doubled (conditioned +
-        null-prosody) and extrapolates v_uncond + cfg * (v_cond - v_uncond). The
-        *prosody* is what gets dropped: it carries the content, so it is what
-        guidance should sharpen. The text rides along unchanged in both halves.
         """
 
         if cfg_scale == 1.0:
@@ -287,11 +275,6 @@ class EchoFM(nn.Module):
     def latent_frames(self, tokens: int) -> int:
         """
         How many latent frames a run of ``tokens`` prosody tokens covers.
-
-        Only inference needs this: in training the length comes from the target.
-        The realised ratio drifts a little per utterance with the rounding at
-        each codec's end -- measured 6.67 to 6.93 against the nominal 6.89 -- so
-        this is the best available estimate, not an exact count.
         """
 
         return max(1, round(tokens * self.LATENT_FRAMES_PER_TOKEN))
@@ -308,11 +291,6 @@ class EchoFM(nn.Module):
         frames: Optional[int] = None,                               # default: from `prosody`
     ) -> torch.Tensor:
         """Integrate the velocity field from t=0 (noise) to t=1 (data).
-
-        The transport starts from Gaussian noise, always. Nothing else seeds it:
-        the prosody tokens are conditioning, read at every step alongside the
-        text, and never the state being carried. ``frames`` overrides the length
-        the token count implies.
 
         NOTE: euler costs one model evaluation per step, midpoint (RK2) two.
         """

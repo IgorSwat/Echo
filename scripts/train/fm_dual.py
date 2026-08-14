@@ -18,7 +18,7 @@ the same step budget, and a budget that anneals early flatters whichever model
 converges fastest rather than whichever ends up best.
 
 The trunk shape is not a flag. It comes from ``fm_model.dual`` in
-``models/config.json``, the way the baseline's comes from ``fm_model.blocks``,
+``models/config.json``, the way the baseline's comes from ``fm_model.trunk``,
 so a checkpoint here is described by the config rather than by whichever command
 line produced it. Trying a different layout means editing that section.
 
