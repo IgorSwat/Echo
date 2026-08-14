@@ -9,6 +9,7 @@ from pathlib import Path
 # The shared helpers (__common__, __style__, ...) sit one level up, in scripts/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import argparse
 import math
 import time
 
@@ -25,6 +26,7 @@ from __common__ import (
     select_device,
     split_loaders,
 )
+from __mlflow__ import DEFAULT_EXPERIMENT, Tracker, prompt_run_details
 from __style__ import Colors, print_header, print_info, print_section, print_separator
 
 from echo import config
@@ -310,8 +312,34 @@ def _ar_loss(
     return ce + ctc_weight * ctc, ce.detach(), ctc.detach()
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Train the EchoAR autoregressive prosody model."
+    )
+    p.add_argument("--name", type=str, default=None,
+                   help="MLflow run name. Asked for at startup when omitted; "
+                        "give it here for a run nobody is watching.")
+    p.add_argument("--description", type=str, default=None, help="MLflow run description.")
+    p.add_argument("--model-type", type=str, default=None, help="MLflow tag: model_type.")
+    p.add_argument("--experiment", type=str, default=DEFAULT_EXPERIMENT,
+                   help=f"MLflow experiment id or name (default: {DEFAULT_EXPERIMENT}).")
+    p.add_argument("--no-mlflow", action="store_true", help="Train without tracking.")
+
+    return p.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
     cfg = config.training.ar
+
+    # Asked before anything slow happens, so a typo costs nothing.
+    if args.no_mlflow:
+        name, description, model_type = None, "", ""
+    else:
+        name, description, model_type = prompt_run_details(
+            args.name, args.description, args.model_type,
+        )
+    tracker = Tracker(name, description, model_type, args.experiment)
 
     seed_everything(cfg.seed)
     device = select_device()
@@ -319,7 +347,8 @@ def main() -> None:
     output_dir = REPO_ROOT / cfg.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    log_file = open(output_dir / "ar_loss_log.csv", "w", encoding="utf-8")
+    log_path = output_dir / "ar_loss_log.csv"
+    log_file = open(log_path, "w", encoding="utf-8")
     log_file.write("step,epoch,train_loss,val_loss,train_ctc,val_ctc,"
                    "train_total,val_total,lr\n")
 
@@ -401,6 +430,37 @@ def main() -> None:
         print_info("History masking", "disabled (history_mask_max is 0)", Colors.WARNING)
     print_separator()
 
+    tracker.log_params({
+        "model": "EchoAR",
+        "dataset": cfg.data_dir,
+        "manifest": manifest.name,
+        "optimizer": "AdamW",
+        "device": str(device),
+        "parameters": sum(p.numel() for p in model.parameters()),
+        "token_layers": EchoAR.NUM_TOKEN_LAYERS,
+        "train_samples": len(train_set),
+        "val_samples": len(val_set),
+        "speakers": len(dataset._by_speaker),
+        "batch_size": cfg.batch_size,
+        "num_epochs": cfg.num_epochs,
+        "total_steps": total_steps,
+        "learning_rate": cfg.learning_rate,
+        "weight_decay": cfg.weight_decay,
+        "warmup_steps": cfg.warmup_steps,
+        "grad_clip": cfg.grad_clip,
+        "seed": cfg.seed,
+        "val_ratio": cfg.val_ratio,
+        "emb_dim": model.emb_dim,
+        "hidden_dim": model.hidden_dim,
+        "decoder_layers": config.ar_model.decoder_num_layers,
+        "decoder_heads": config.ar_model.decoder_num_heads,
+        "intra_frame_cond": model.predictor.uses_cond,
+        "ctc_weight": cfg.ctc_weight if use_ctc else 0.0,
+        "ctc_upsample": config.ar_model.ctc_upsample if use_ctc else None,
+        "history_mask_max": cfg.history_mask_max,
+        "min_ref_frames": MIN_REF_FRAMES,
+    })
+
     # --- Training loop ------------------------------------------------------
     model.train()
     step = 0
@@ -454,6 +514,12 @@ def main() -> None:
                 log_file.write(f"{step},{epoch + 1},{ce.item():.6f},,{ctc.item():.6f},,"
                                f"{loss.item():.6f},,{lr:.6e}\n")
                 log_file.flush()
+                # Metric names match register_mlflow.py, so a live run and a
+                # replayed one plot on the same axes.
+                tracker.log_metrics({
+                    "train_loss": ce.item(), "train_total": loss.item(),
+                    "train_ctc": ctc.item(), "learning_rate": lr, "epoch": epoch + 1,
+                }, step=step)
 
         # --- Validation -----------------------------------------------------
         # Checkpoints are selected on the cross-entropy alone, not the total: the
@@ -492,6 +558,11 @@ def main() -> None:
                        f"{train_ctc_avg:.6f},{val_ctc:.6f},"
                        f"{train_total_avg:.6f},{val_total:.6f},{lr:.6e}\n")
         log_file.flush()
+        tracker.log_metrics({
+            "val_loss": val_loss, "val_ctc": val_ctc, "val_total": val_total,
+            "train_loss_epoch": train_loss_avg, "train_ctc_epoch": train_ctc_avg,
+            "train_total_epoch": train_total_avg, "mask_rate": mask_rate,
+        }, step=step)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -522,6 +593,13 @@ def main() -> None:
     print_info("Final checkpoint", str(ckpt), Colors.OKCYAN)
     print_info("Total time", f"{time.perf_counter() - t_start:.1f}s", Colors.OKCYAN)
     log_file.close()
+
+    # The csv goes up whole, so a run keeps the same artifact the replay script
+    # would have produced, and the config states what the numbers came from.
+    tracker.log_metrics({"best_val_loss": best_val_loss}, step=step)
+    tracker.log_artifact(log_path)
+    tracker.log_artifact(REPO_ROOT / "models" / "config.json")
+    tracker.finish()
 
 
 if __name__ == "__main__":

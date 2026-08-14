@@ -132,3 +132,5 @@ checkpoints/*.pt
 # Misc
 checkpoints/**
 *.wav
+# MLflow tracking credentials (username / password)
+mlflow_credits.txt
