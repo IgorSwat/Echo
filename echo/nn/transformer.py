@@ -116,6 +116,63 @@ class SelfAttentionDecoder(nn.Module):
         return x, caches                                            # (B, T, D), per-block caches
 
 
+class HybridAttentionEncoder(nn.Module):
+    """
+    Bidirectional Transformer Encoder + cross attention (encoder-decoder, no mask)
+
+    The self-attention twin of :class:`HybridAttentionDecoder`: same blocks, same
+    cross-attention over an external context, but every position sees every other
+    one. What it is for is a stream that is generated in one shot rather than
+    frame by frame, where a causal mask would only hide information the model
+    already has.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_kv: int,
+        num_layers: int,
+        num_heads: int,
+        ffn_dim: int,
+        use_rope: bool = False,
+        rope_norm: str = "query",
+        use_glu: bool = False,
+        use_ada_ln: bool = False,       # Only if AdaLN conditioning is active
+        cond_dim: Optional[int] = None,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.use_ada_ln = use_ada_ln
+
+        self.blocks = nn.ModuleList([
+            HybridAttentionBlock(
+                d_model, d_kv, num_heads, ffn_dim,
+                dropout, use_rope,
+                use_ada_ln, cond_dim, use_glu,
+                mode="bidirectional",
+                rope_norm=rope_norm,
+            )
+            for _ in range(num_layers)
+        ])
+
+        self.norm = ConditionalLayerNorm(d_model, cond_dim, use_ada_ln=use_ada_ln)
+
+    def forward(
+        self,
+        x: torch.Tensor,                                            # (B, T, d_model)
+        context: Optional[torch.Tensor],                            # (B, S, d_kv)
+        padding_mask: Optional[torch.Tensor] = None,                # (B, T) or None
+        context_padding_mask: Optional[torch.Tensor] = None,        # (B, S) or None
+        cond: Optional[torch.Tensor] = None,                        # (B, cond_dim) or None
+    ) -> torch.Tensor:
+        for block in self.blocks:
+            x, _ = block(x, context, padding_mask, context_padding_mask, cond)
+
+        x, _ = self.norm(x, cond)                                   # (B, T, d_model)
+
+        return x                                                    # (B, T, d_model)
+
+
 class HybridAttentionDecoder(nn.Module):
     """
     Causal Transformer Decoder + cross attention (for encoder-decoder architectures)

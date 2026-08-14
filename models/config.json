@@ -49,6 +49,37 @@
       "upsample": 2
     }
   },
+  "nar_model": {
+    "num_layers": 8,
+    "emb_dim": 256,
+    "hidden_dim": 512,
+    "cond_dim": 128,
+    "text_encoder": {
+      "d_model": 256,
+      "num_layers": 6,
+      "num_heads": 8,
+      "ffn_dim": 1024,
+      "ffn_glu": false,
+      "kernel_size": 5,
+      "dropout": 0.1,
+      "use_rope": true,
+      "conv_use_norm": true
+    },
+    "encoder": {
+      "num_layers": 12,
+      "num_heads": 8,
+      "ffn_dim": 2048,
+      "ffn_glu": false,
+      "dropout": 0.1,
+      "use_rope": true,
+      "rope_norm": "query"
+    },
+    "head": {
+      "num_layers": 1,
+      "hidden_dim": 1024,
+      "dropout": 0.1
+    }
+  },
   "fm_model": {
     "text_embedding_dim": 256,
     "time_embedding_dim": 128,
@@ -104,6 +135,23 @@
       "history_mask_span_min": 2,
       "history_mask_span_max": 5,
       "history_mask_token_frac": 0.33
+    },
+    "nar": {
+      "data_dir": "data/ljspeech",
+      "output_dir": "checkpoints/ljspeech",
+      "batch_size": 16,
+      "num_epochs": 30,
+      "val_ratio": 0.05,
+      "learning_rate": 0.0005,
+      "weight_decay": 0.01,
+      "warmup_steps": 500,
+      "grad_clip": 1.0,
+      "num_workers": 4,
+      "log_every": 20,
+      "save_every": 2,
+      "early_stop": 5,
+      "seed": 42,
+      "token_noise": 0.05
     },
     "fm": {
       "data_dir": "data/ljspeech",

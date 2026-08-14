@@ -2,8 +2,9 @@
 """Detailed parameter breakdown of the Echo models, in pipeline order.
 
 For EchoAR: the token embeddings, TextEncoder, decoder blocks and the
-per-token-layer heads. For EchoFM: the TimeEncoder, TextEncoder and each block
-of the main processing stack, grouped by block type.
+per-token-layer heads. For EchoNAR: the same, with one embedding table and one
+head per codec layer. For EchoFM: the TimeEncoder, TextEncoder and each block of
+the main processing stack, grouped by block type.
 
 Usage:
     python scripts/overview/count_params.py
@@ -36,6 +37,7 @@ from __style__ import (
 from echo import config
 from echo.ar_model import EchoAR
 from echo.fm_model import EchoFM
+from echo.nar_model import EchoNAR
 
 
 def _count_params(module: torch.nn.Module) -> int:
@@ -138,21 +140,61 @@ def report_ar() -> None:
     print_info("Total", _fmt(total), Colors.OKCYAN)
 
 
+def report_nar() -> None:
+    model = EchoNAR()
+    model.eval()
+    total = _count_params(model)
+
+    print_header("EchoNAR — non-autoregressive acoustic model")
+
+    print_section("Top-level components")
+    components = [
+        ("Token embeddings", _count_params(model.embed)),
+        ("Layer embedding", _count_params(model.layer_embed)),
+        ("TextEncoder", _count_params(model.text_encoder)),
+        ("Encoder", _count_params(model.encoder)),
+        ("Heads", _count_params(model.heads)),
+    ]
+    if model.in_proj is not None:
+        components.insert(4, ("Input projection", _count_params(model.in_proj)))
+
+    _print_components(components, total)
+
+    print_separator()
+    print_info("Total", _fmt(total), Colors.OKCYAN)
+
+    print_section("Dimensions")
+    print_info("Codec layers", f"{model.num_layers} (writing {model.num_written})")
+    print_info("Codebook size", _fmt(model.CODEBOOK_SIZE))
+    print_info("Embedding dim", str(model.emb_dim))
+    print_info("Hidden dim", model.hidden_dim)
+    print_info("Layer cond dim", model.cond_dim)
+    print_info("Text context dim", config.nar_model.text_encoder_d_model)
+
+    _print_blocks(model.encoder.blocks, total, "Encoder blocks")
+
+    print_separator()
+    print_info("Total", _fmt(total), Colors.OKCYAN)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Echo parameter breakdown.")
-    parser.add_argument("--model", type=str, default="all", choices=["all", "ar", "fm"],
+    parser.add_argument("--model", type=str, default="all", choices=["all", "ar", "nar", "fm"],
                         help="which model to report on (default: all)")
     args = parser.parse_args()
 
     print_test_title("Echo — Parameter Breakdown")
 
-    # Pipeline order: EchoAR writes the prosody tokens EchoFM then renders.
+    # Pipeline order: EchoAR writes the layer-0 tokens, which EchoNAR extends
+    # into the acoustic layers and EchoFM renders as a latent — two endings to
+    # the same beginning, not two stages of one chain.
     if args.model in ("all", "ar"):
         report_ar()
-    if args.model in ("all", "fm"):
-        if args.model == "all":
-            print()
-        report_fm()
+    for name, report in (("nar", report_nar), ("fm", report_fm)):
+        if args.model in ("all", name):
+            if args.model == "all":
+                print()
+            report()
 
 
 if __name__ == "__main__":
