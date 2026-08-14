@@ -46,7 +46,7 @@
     },
     "ctc": {
       "enabled": true,
-      "upsample": 2
+      "upsample": 4
     }
   },
   "fm_model": {

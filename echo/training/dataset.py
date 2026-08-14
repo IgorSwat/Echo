@@ -119,8 +119,10 @@ class EchoDataset(Dataset):
 
         The aligner runs on the AR stage's BOS-prefixed input, so its last
         `ctc_upsample` frames come from the state that predicts EOS and sit past
-        the last audio frame; they are dropped so the row covers exactly the
-        span the latent does.
+        the last audio frame. Those are dropped -- but only while they are
+        blank: a peaky head places the final phoneme inside them, and a fixed
+        trim then deletes it. At 50 Hz that cost a phoneme in 130 of 150
+        utterances, silently, so the trim stops at the first real frame.
         """
 
         if align_path is None:
@@ -128,12 +130,17 @@ class EchoDataset(Dataset):
 
         z = np.load(align_path, allow_pickle=True)
         trim = config.ar_model.ctc_upsample
-        flat, offsets = z["flat"], z["offsets"]
+        flat, offsets, blank = z["flat"], z["offsets"], int(z["blank"])
 
-        return {
-            str(name): flat[offsets[i]:offsets[i + 1] - trim].astype(np.int64)
-            for i, name in enumerate(z["names"])
-        }
+        out = {}
+        for i, name in enumerate(z["names"]):
+            row = flat[offsets[i]:offsets[i + 1]]
+            end = len(row)
+            while end > 0 and len(row) - end < trim and row[end - 1] == blank:
+                end -= 1
+            out[str(name)] = row[:end].astype(np.int64)
+
+        return out
 
     def __len__(self) -> int:
         return len(self._samples)
