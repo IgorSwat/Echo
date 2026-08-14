@@ -16,11 +16,12 @@ import torch.nn as nn
 
 class EchoAR(nn.Module):
     """
-    EchoAR: text-conditioned autoregressive model over two layers of prosody tokens.
+    EchoAR: text-conditioned autoregressive model over one layer of prosody tokens.
     """
 
-    # Number of stacked prosody token layers (x[..., 0] and x[..., 1]).
-    NUM_TOKEN_LAYERS = 2
+    # Number of stacked prosody token layers -- Mimi's semantic layer alone,
+    # which is the stream the flow-matching stage reads.
+    NUM_TOKEN_LAYERS = 1
 
     # How many decoding steps to run between two EOS checks.
     EOS_CHECK_EVERY = 6
@@ -157,9 +158,9 @@ class EchoAR(nn.Module):
 
     @staticmethod
     def merged_frame_counts(
-        x: torch.Tensor,                                             # (B, T, 2) long
+        x: torch.Tensor,                                             # (B, T, L) long
         padding_mask: Optional[torch.Tensor] = None,                 # (B, T) or None
-        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, 2) or None
+        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, L) or None
         ref_codec_padding_mask: Optional[torch.Tensor] = None,       # (B, T_ref) or None
     ) -> tuple[torch.Tensor, int]:
         """Where each row's target half starts, and how long the merge runs.
@@ -204,14 +205,14 @@ class EchoAR(nn.Module):
 
     def _trunk(
         self,
-        x: torch.Tensor,                                             # (B, T, 2) long
+        x: torch.Tensor,                                             # (B, T, L) long
         text: Optional[torch.Tensor] = None,                         # (B, S) long or None
         padding_mask: Optional[torch.Tensor] = None,                 # (B, T) or None
         text_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
         context: Optional[torch.Tensor] = None,                      # (B, S, d_text) or None
         kv_cache: Optional[HybridKVCache] = None,                    # decoder caches, per block
         start_pos: int = 0,                                          # frames already decoded
-        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, 2) or None
+        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, L) or None
         ref_codec_padding_mask: Optional[torch.Tensor] = None,       # (B, T_ref) or None
         ref_text: Optional[torch.Tensor] = None,                     # (B, S_ref) or None
         ref_text_padding_mask: Optional[torch.Tensor] = None,        # (B, S_ref) or None
@@ -250,7 +251,7 @@ class EchoAR(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,                                             # (B, T, 2) long
+        x: torch.Tensor,                                             # (B, T, L) long
         text: Optional[torch.Tensor] = None,                         # (B, S) long or None
         padding_mask: Optional[torch.Tensor] = None,                 # (B, T) or None
         text_padding_mask: Optional[torch.Tensor] = None,            # (B, S) or None
@@ -260,7 +261,7 @@ class EchoAR(nn.Module):
         return_cache: bool = False,
         cond_tokens: Optional[torch.Tensor] = None,                  # (B, F, 1) long or None
         return_hidden: bool = False,
-        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, 2) or None
+        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, L) or None
         ref_codec_padding_mask: Optional[torch.Tensor] = None,       # (B, T_ref) or None
         ref_text: Optional[torch.Tensor] = None,                     # (B, S_ref) or None
         ref_text_padding_mask: Optional[torch.Tensor] = None,        # (B, S_ref) or None
@@ -309,7 +310,7 @@ class EchoAR(nn.Module):
                 dim=2,
             )                                                        # (B, F, layers-1, emb_dim)
 
-        logits = self.predictor(h, cond_emb)                         # (B, T, 2, vocab)
+        logits = self.predictor(h, cond_emb)                         # (B, T, L, vocab)
 
         if return_cache and return_hidden:
             return logits, caches, h
@@ -375,7 +376,7 @@ class EchoAR(nn.Module):
         eos_check_every: Optional[int] = None,
         temperature: float = 0.0,
         top_k: int = 0,
-        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, 2) or None
+        ref_codec: Optional[torch.Tensor] = None,                    # (B, T_ref, L) or None
         ref_codec_padding_mask: Optional[torch.Tensor] = None,       # (B, T_ref) or None
         ref_text: Optional[torch.Tensor] = None,                     # (B, S_ref) or None
         ref_text_padding_mask: Optional[torch.Tensor] = None,        # (B, S_ref) or None

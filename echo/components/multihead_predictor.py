@@ -96,10 +96,11 @@ class MultiHeadPredictor(nn.Module):
             for _ in range(num_heads)
         ])
 
-        # One FiLM per head above the first.
+        # One FiLM per head above the first, so a single head has none: there
+        # is no layer below it to condition on, and `uses_cond` says so.
         self.film = nn.ModuleList([
             IntraFrameFiLM(d_in, cond_dim) for _ in range(num_heads - 1)
-        ]) if cond_dim is not None else None
+        ]) if cond_dim is not None and num_heads > 1 else None
 
     @property
     def uses_cond(self) -> bool:

@@ -219,8 +219,9 @@ def _parse_args() -> argparse.Namespace:
                              "the Mimi encode step.")
     parser.add_argument("--output-dir", type=str, required=True,
                         help="Directory to write .npz latent files to.")
-    parser.add_argument("--layers", type=int, default=2,
-                        help="Mimi codec layers to keep (default: 2).")
+    parser.add_argument("--layers", type=int, default=EchoAR.NUM_TOKEN_LAYERS,
+                        help=f"Mimi codec layers to keep (default: "
+                             f"{EchoAR.NUM_TOKEN_LAYERS}, what EchoAR predicts).")
     parser.add_argument("--ext", action="append",
                         help="Additional audio extension to include (may be repeated).")
     parser.add_argument("--limit", "--samples", dest="limit", type=int, default=None,

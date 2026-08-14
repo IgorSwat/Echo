@@ -113,7 +113,8 @@ def report_ar() -> None:
 
     print_section("Top-level components")
     components = [
-        (f"Token embeddings (x{len(model.embed)})", _count_params(model.embed)),
+        (f"Token embeddings (x{len(model.codec_embed.embed)})",
+         _count_params(model.codec_embed)),
         ("TextEncoder", _count_params(model.text_encoder)),
         ("Decoder", _count_params(model.decoder)),
         (f"Heads (x{len(model.predictor.heads)})", _count_params(model.predictor.heads)),

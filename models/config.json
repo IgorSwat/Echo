@@ -32,7 +32,7 @@
       "conv_use_norm": true
     },
     "decoder": {
-      "num_layers": 12,
+      "num_layers": 10,
       "num_heads": 8,
       "ffn_dim": 2048,
       "ffn_glu": false,

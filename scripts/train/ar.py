@@ -242,12 +242,12 @@ def _ar_loss(
     layer is never fed to itself, so no head sees its own label.
     """
 
-    codec = batch["codec"].to(device)                                # (B, T, 2)
+    codec = batch["codec"].to(device)                                # (B, T, L)
     text = batch["text"].to(device)                                  # (B, S)
     codec_mask = batch["codec_key_padding_mask"].to(device)          # (B, T)
     text_mask = batch["text_key_padding_mask"].to(device)            # (B, S)
 
-    ref_codec = batch["ref_codec"].to(device)                        # (B, T_ref, 2)
+    ref_codec = batch["ref_codec"].to(device)                        # (B, T_ref, L)
     ref_codec_mask = batch["ref_codec_key_padding_mask"].to(device)  # (B, T_ref)
     ref_text = batch["ref_text"].to(device)                          # (B, S_ref)
     ref_text_mask = batch["ref_text_key_padding_mask"].to(device)    # (B, S_ref)
@@ -268,7 +268,7 @@ def _ar_loss(
     # codebook axis, not history.
     inputs = _corrupt_history(inputs, input_mask, mask_rate, config.training.ar)
 
-    cond_tokens = targets[..., :-1] if config.ar_model.head_intra_frame_cond else None
+    cond_tokens = targets[..., :-1] if model.predictor.uses_cond else None
 
     # Everything laid out along the frame axis is pushed back by the reference
     # exactly as the model pushes it back, through the same function and the same
