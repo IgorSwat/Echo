@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from echo import config
 from echo.tokenizer import Tokenizer
 
 
@@ -37,6 +38,7 @@ class EchoDataset(Dataset):
         load_distil: bool = True,
         load_codec: bool = True,
         norm_mode: str = "dataset",
+        align_path: str | Path | None = None,
     ) -> None:
         if norm_mode not in self.NORM_MODES:
             raise ValueError(f"norm_mode must be one of {self.NORM_MODES}, got {norm_mode!r}")
@@ -62,6 +64,7 @@ class EchoDataset(Dataset):
             self._dirs[name] = Path(directory) if enabled else None
 
         self._stats = self._load_stats(latent_stats)
+        self._align = self._load_align(align_path)
         self._samples = self._load_index(Path(phonemes_csv))
 
     # ---------
@@ -108,6 +111,29 @@ class EchoDataset(Dataset):
             torch.from_numpy(stats["mean"].astype(np.float32)),      # (C,)
             torch.from_numpy(stats["std"].astype(np.float32)),       # (C,)
         )
+
+    @staticmethod
+    def _load_align(align_path: str | Path | None) -> dict[str, np.ndarray] | None:
+        """
+        The CTC alignment npz as `name -> (A,) int` frame-level phoneme ids.
+
+        The aligner runs on the AR stage's BOS-prefixed input, so its last
+        `ctc_upsample` frames come from the state that predicts EOS and sit past
+        the last audio frame; they are dropped so the row covers exactly the
+        span the latent does.
+        """
+
+        if align_path is None:
+            return None
+
+        z = np.load(align_path, allow_pickle=True)
+        trim = config.ar_model.ctc_upsample
+        flat, offsets = z["flat"], z["offsets"]
+
+        return {
+            str(name): flat[offsets[i]:offsets[i + 1] - trim].astype(np.int64)
+            for i, name in enumerate(z["names"])
+        }
 
     def __len__(self) -> int:
         return len(self._samples)
@@ -173,5 +199,7 @@ class EchoDataset(Dataset):
 
         if self._dirs["codec"] is not None:
             sample["codec"] = self._load_codes(npz_name)
+        if self._align is not None:
+            sample["align"] = torch.from_numpy(self._align[npz_name])
 
         return sample

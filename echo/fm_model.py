@@ -115,19 +115,6 @@ class EchoFM(nn.Module):
                 cond_dim=self.cond_dim,
             )
 
-        def attention(dim: int) -> nn.Module:
-            return HybridAttentionBlock(
-                d_model=dim,
-                d_kv=self.hidden_dim,
-                num_heads=cfg.num_heads,
-                ffn_dim=int(cfg.ffn_mult * dim),
-                dropout=cfg.dropout,
-                use_rope=cfg.use_rope,
-                rope_norm=cfg.rope_norm,
-                use_ada_ln=True,
-                cond_dim=self.cond_dim,
-            )
-
         for i, stage in enumerate(cfg.stages):
             if stage.num_conv < 2 or stage.num_conv % 2 != 0:
                 raise ValueError(
@@ -148,10 +135,26 @@ class EchoFM(nn.Module):
                 blocks.append(convnext(dim if j == 0 else stage.dim, stage.dim))
             dim = stage.dim
 
-            blocks.extend(attention(dim) for _ in range(stage.num_attention))
+            blocks.extend(self._attention_block(dim)
+                          for _ in range(stage.num_attention))
             blocks.extend(convnext(dim, dim) for _ in range(stage.num_conv - before))
 
         return nn.ModuleList(blocks), dim
+
+    def _attention_block(self, dim: int) -> nn.Module:
+        cfg = config.fm_model.trunk
+
+        return HybridAttentionBlock(
+            d_model=dim,
+            d_kv=self.hidden_dim,
+            num_heads=cfg.num_heads,
+            ffn_dim=int(cfg.ffn_mult * dim),
+            dropout=cfg.dropout,
+            use_rope=cfg.use_rope,
+            rope_norm=cfg.rope_norm,
+            use_ada_ln=True,
+            cond_dim=self.cond_dim,
+        )
 
     def _init_weights(self) -> None:
         # Submodules initialized themselves; this covers what EchoFM owns directly.
@@ -164,6 +167,40 @@ class EchoFM(nn.Module):
     # Prosody conditioning
     # -------------------
 
+    def _stretch(
+        self,
+        tokens: torch.Tensor,                                       # (B, K) long
+        frames: int,                                                # T, the latent's length
+        token_key_padding_mask: Optional[torch.Tensor] = None,      # (B, K) or None
+        latent_key_padding_mask: Optional[torch.Tensor] = None,     # (B, T) or None
+    ) -> torch.Tensor:
+        """
+        Resample a token grid onto the latent grid, per row from the real lengths.
+        """
+
+        B, K = tokens.shape
+        device = tokens.device
+
+        if token_key_padding_mask is not None:
+            k = token_key_padding_mask.sum(1)                        # (B,)
+        else:
+            k = torch.full((B,), K, dtype=torch.long, device=device)
+        if latent_key_padding_mask is not None:
+            t_len = latent_key_padding_mask.sum(1)                   # (B,)
+        else:
+            t_len = torch.full((B,), frames, dtype=torch.long, device=device)
+
+        k = k.clamp(min=1)
+        t_len = t_len.clamp(min=1)
+
+        pos = torch.arange(frames, device=device)[None, :]           # (1, T)
+        idx = (pos * k[:, None]) // t_len[:, None]                   # (B, T)
+        # Past a row's own end the index runs off; it is clamped to that row's
+        # last real token and the position is masked out downstream regardless.
+        idx = torch.minimum(idx, (k - 1)[:, None]).clamp(min=0)
+
+        return tokens.gather(1, idx)                                 # (B, T)
+
     def embed_prosody(
         self,
         prosody: torch.Tensor,                                      # (B, K) long
@@ -175,28 +212,11 @@ class EchoFM(nn.Module):
         Stretch the token grid onto the latent grid and embed it.
         """
 
-        B, K = prosody.shape
-        device = prosody.device
+        idx = self._stretch(
+            prosody, frames, prosody_key_padding_mask, latent_key_padding_mask,
+        )                                                            # (B, T)
 
-        if prosody_key_padding_mask is not None:
-            k = prosody_key_padding_mask.sum(1)                     # (B,)
-        else:
-            k = torch.full((B,), K, dtype=torch.long, device=device)
-        if latent_key_padding_mask is not None:
-            t_len = latent_key_padding_mask.sum(1)                  # (B,)
-        else:
-            t_len = torch.full((B,), frames, dtype=torch.long, device=device)
-
-        k = k.clamp(min=1)
-        t_len = t_len.clamp(min=1)
-
-        pos = torch.arange(frames, device=device)[None, :]          # (1, T)
-        idx = (pos * k[:, None]) // t_len[:, None]                  # (B, T)
-        # Past a row's own end the index runs off; it is clamped to that row's
-        # last real token and the position is masked out downstream regardless.
-        idx = torch.minimum(idx, (k - 1)[:, None]).clamp(min=0)
-
-        return self.prosody_embed(prosody.gather(1, idx))           # (B, T, prosody_dim)
+        return self.prosody_embed(idx)                               # (B, T, prosody_dim)
 
     # --------------
     # Forward pass

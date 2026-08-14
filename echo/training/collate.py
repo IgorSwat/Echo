@@ -39,6 +39,7 @@ def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
 
         text    (B, S)      long   | latent  (B, T, C)   float
         codec   (B, T_c, L) long   | distil  (B, T, C)   float
+        align   (B, T_a)    long
     """
     fields = batch[0].keys()
     out: dict[str, torch.Tensor] = {}
@@ -76,5 +77,12 @@ def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         lengths = torch.tensor([c.size(0) for c in codes], dtype=torch.long)
         out["codec"] = _padded(codes, lengths, config.prosody_pad)
         out["codec_key_padding_mask"] = _mask(lengths)
+
+    # --- Frame-aligned phonemes: a coarser grid again, padded with the blank ---
+    if "align" in fields:
+        aligns = [s["align"] for s in batch]
+        lengths = torch.tensor([a.size(0) for a in aligns], dtype=torch.long)
+        out["align"] = _padded(aligns, lengths, config.text_vocab_size)
+        out["align_key_padding_mask"] = _mask(lengths)
 
     return out

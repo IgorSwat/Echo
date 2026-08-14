@@ -182,6 +182,10 @@ class FMModelConfig:
     # input is ``latent_dim + prosody_embedding_dim`` wide.
     prosody_embedding_dim: int
 
+    # Width of the frame-aligned phoneme embedding, read only by the aligned
+    # variant: it concatenates that stream to the latent as well.
+    align_embedding_dim: int
+
     # Text encoder (Conformer)
     text_encoder_num_layers: int
     text_encoder_num_heads: int
@@ -207,6 +211,7 @@ class FMModelConfig:
             text_embedding_dim=d["text_embedding_dim"],
             time_embedding_dim=d["time_embedding_dim"],
             prosody_embedding_dim=d["prosody_embedding_dim"],
+            align_embedding_dim=d.get("align_embedding_dim", 128),
             text_encoder_num_layers=te["num_layers"],
             text_encoder_num_heads=te["num_heads"],
             text_encoder_ffn_dim=te["ffn_dim"],

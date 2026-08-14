@@ -123,6 +123,7 @@ $RECYCLE.BIN/
 data/**/*.mp3
 data/**/*.wav
 data/**/*.npz
+!data/**/ctc_align.npz
 
 # Model files
 models/*.pt
